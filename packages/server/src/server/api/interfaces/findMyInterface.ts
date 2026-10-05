@@ -7,8 +7,72 @@ import { checkPrivateApiStatus, waitMs } from "@server/helpers/utils";
 import { quitFindMyFriends, startFindMyFriends, showFindMyFriends, hideFindMyFriends } from "../apple/scripts";
 import { FindMyDevice, FindMyItem, FindMyLocationItem } from "@server/api/lib/findmy/types";
 import { transformFindMyItemToDevice } from "@server/api/lib/findmy/utils";
+import {
+    assertFindMyLocationsFresh,
+    assertFindMyLocationsUsable,
+    loadBeaconStoreKey,
+    readFindMyFriendsFromSecureCache
+} from "@server/api/lib/findmy/SecureLocationReader";
+import { startBackgroundFindMyRefresh } from "@server/api/lib/findmy/BackgroundFindMyRefresh";
+import { PrivateApiFindMyEventHandler } from "@server/api/privateApi/eventHandlers/PrivateApiFindMyEventHandler";
+import { FindMyAddressResolver, createAppleReverseGeocodeRunner } from "@server/api/lib/findmy/AppleReverseGeocoder";
 
 export class FindMyInterface {
+    // Shared across requests so the in-memory coordinate-cell cache and failure backoff
+    // survive between refreshes. Initialized lazily because `FileSystem.resources` depends
+    // on the app path, which is only known after Electron starts.
+    private static addressResolver: FindMyAddressResolver | null = null;
+
+    private static getAddressResolver(): FindMyAddressResolver | null {
+        if (this.addressResolver) return this.addressResolver;
+
+        const binary = FileSystem.findMyReverseGeocoder;
+        if (!fs.existsSync(binary)) {
+            Server().logger.debug("Find My reverse geocoder helper not present; leaving labels as 'Location'.");
+            return null;
+        }
+
+        this.addressResolver = new FindMyAddressResolver(createAppleReverseGeocodeRunner(binary));
+        return this.addressResolver;
+    }
+
+    /**
+     * Applies any already-resolved labels to the cache, then kicks off background
+     * resolution for the records still missing one. Resolved labels enrich the cached
+     * entry and are re-emitted over the existing Find My socket path, so the Android
+     * client picks up "City, ST" without another refresh. Coordinates are geocoded only
+     * through Apple's on-device CLGeocoder via the packaged helper.
+     */
+    private static enrichMissingAddresses(locations: FindMyLocationItem[]): FindMyLocationItem[] {
+        const resolver = this.getAddressResolver();
+        if (!resolver) return locations;
+
+        // Serve labels we already resolved on an earlier refresh.
+        const withCachedLabels = resolver.applyCachedLabels(locations);
+        for (const item of withCachedLabels) {
+            if (!item.handle) continue;
+            Server().findMyCache.enrichAddresses(item.handle, item.long_address, item.short_address);
+        }
+
+        resolver.resolveMissingLabels(
+            locations,
+            async (item, labels) => {
+                if (!item.handle) return;
+                Server().logger.debug(`Resolved Find My address label: ${labels.long}`);
+                const enriched = Server().findMyCache.enrichAddresses(item.handle, labels.long, labels.short);
+                if (enriched) {
+                    await new PrivateApiFindMyEventHandler().handleNewLocation([enriched]);
+                }
+            },
+            error => {
+                Server().logger.debug("Failed to reverse geocode a Find My location.");
+                Server().logger.debug(String(error));
+            }
+        );
+
+        return withCachedLabels;
+    }
+
     static async getFriends() {
         return Server().findMyCache.getAll();
     }
@@ -58,7 +122,7 @@ export class FindMyInterface {
 
             return [...(devices ?? []), ...transformedItems];
         } catch (ex: any) {
-            Server().logger.debug('An error occurred while reading FindMy Device cache files.');
+            Server().logger.debug("An error occurred while reading FindMy Device cache files.");
             Server().logger.debug(String(ex));
             return null;
         }
@@ -71,6 +135,64 @@ export class FindMyInterface {
     }
 
     static async refreshFriends(openFindMyApp = true): Promise<FindMyLocationItem[]> {
+        let refreshedFindMyApp = false;
+
+        // searchpartyd keeps current friend locations in its encrypted
+        // SecureLocationCache on every macOS version that ships it, so there is no
+        // version gate here. Prefer that direct source over the opportunistic
+        // Messages/FMFSessions event cache, which has no on-demand refresh.
+        if (fs.existsSync(FileSystem.findMySecureLocationsDir) && fs.existsSync(FileSystem.findMyFriendCachePath)) {
+            const readDirectLocations = () =>
+                readFindMyFriendsFromSecureCache(
+                    FileSystem.findMySecureLocationsDir,
+                    FileSystem.findMyFriendCachePath,
+                    loadBeaconStoreKey(),
+                    (name, error) => {
+                        Server().logger.debug(`Failed to decrypt SecureLocationCache record ${name}.`);
+                        Server().logger.debug(String(error));
+                    }
+                );
+
+            // The AppleScript bounce takes about 25 seconds, while the Android friends
+            // endpoint uses the normal API timeout. Return the best current snapshot
+            // immediately, refresh in the background, then publish changed locations
+            // over the socket path the client already listens to.
+            if (openFindMyApp) {
+                startBackgroundFindMyRefresh(
+                    () => this.refreshLocationsAccessibility(),
+                    readDirectLocations,
+                    async locations => {
+                        assertFindMyLocationsFresh(locations);
+                        // Apply already-resolved labels (including a friend's last known
+                        // label) BEFORE publishing, so a friend whose coordinates shifted
+                        // keeps "City, ST" instead of flashing back to "Location" while the
+                        // new cell is reverse-geocoded in the background.
+                        const enriched = this.enrichMissingAddresses(locations);
+                        await new PrivateApiFindMyEventHandler().handleNewLocation(enriched);
+                    },
+                    error => {
+                        Server().logger.debug("Failed to refresh Find My friends from SecureLocationCache.");
+                        Server().logger.debug(String(error));
+                    }
+                );
+                refreshedFindMyApp = true;
+            }
+
+            try {
+                const directLocations = readDirectLocations();
+                assertFindMyLocationsUsable(directLocations);
+                Server().findMyCache.addAll(directLocations);
+                this.enrichMissingAddresses(directLocations);
+                return Server().findMyCache.getAll();
+            } catch (ex: any) {
+                // Fall through to the Messages/FMFSessions path below. On Monterey that path
+                // has no on-demand refresh and usually returns stale data, but returning
+                // whatever it holds beats failing the request outright.
+                Server().logger.debug("Failed to read Find My friends from SecureLocationCache.");
+                Server().logger.debug(String(ex));
+            }
+        }
+
         const papiEnabled = Server().repo.getConfig("enable_private_api") as boolean;
         if (papiEnabled && isMinBigSur && !isMinSonoma) {
             checkPrivateApiStatus();
@@ -85,7 +207,7 @@ export class FindMyInterface {
         // No matter what, open the Find My app.
         // Don't await because it should update in the background.
         // Location updates get emitted as an event as they come in.
-        if (openFindMyApp) {
+        if (openFindMyApp && !refreshedFindMyApp) {
             this.refreshLocationsAccessibility();
         }
 

@@ -84,6 +84,27 @@ export class FindMyFriendsCache {
         return this.cache[handle] ?? null;
     }
 
+    /**
+     * Updates only the display addresses of a cached entry, bypassing `add()`'s
+     * deduplication. `add()` drops updates whose coordinates and timestamp are unchanged,
+     * which is exactly the case when a reverse-geocoded label arrives after the
+     * coordinates were already cached. Returns the enriched item, or null if the entry
+     * has since been removed.
+     */
+    enrichAddresses(handle: string, long_address: string, short_address: string): FindMyLocationItem | null {
+        const current = this.cache[handle];
+        if (!current) return null;
+
+        const enriched: FindMyLocationItem = {
+            ...current,
+            long_address,
+            short_address
+        };
+
+        this.cache[handle] = enriched;
+        return enriched;
+    }
+
     getAll(): FindMyLocationItem[] {
         return Object.values(this.cache);
     }
