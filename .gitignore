@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+.vscode
+.DS_Store
+**/*.log
+.env
+.build
+.swiftpm
+.yarn
+.yarnrc*
+.npmrcnode_modules/
+packages/*/node_modules/
+packages/server/dist/
+packages/ui/build/
+*.log
