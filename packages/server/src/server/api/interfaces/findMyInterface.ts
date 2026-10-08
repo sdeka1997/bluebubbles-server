@@ -111,6 +111,8 @@ export class FindMyInterface {
 
     static async refreshFriends(openFindMyApp = true): Promise<FindMyLocationItem[]> {
         let refreshedFindMyApp = false;
+        // Find My's roster is authoritative for identity, favorites, and removals.
+        Server().findMyCache.refreshRoster(true);
 
         // searchpartyd keeps current friend locations in its encrypted
         // SecureLocationCache on every macOS version that ships it, so there is no
