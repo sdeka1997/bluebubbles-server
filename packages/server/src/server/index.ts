@@ -78,6 +78,7 @@ import { obfuscatedHandle } from "./utils/StringUtils";
 import { AutoStartMethods } from "./databases/server/constants";
 import { MacOsInterface } from "./api/interfaces/macosInterface";
 import { ZrokManager } from "./managers/zrokManager";
+import { resolveFcmPriority } from "./services/fcmService/FcmPriority";
 
 const findProcess = require("find-process");
 
@@ -1213,7 +1214,7 @@ class BlueBubblesServer extends EventEmitter {
                     await this.fcm?.sendNotification(
                         devices.map(device => device.identifier),
                         { type, data: notifData },
-                        priority
+                        resolveFcmPriority(type, priority)
                     );
                 }
             }
