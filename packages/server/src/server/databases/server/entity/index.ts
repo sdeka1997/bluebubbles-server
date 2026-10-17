@@ -8,3 +8,5 @@ import { ContactAddress } from "./ContactAddress";
 import { ScheduledMessage } from "./ScheduledMessage";
 
 export { Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage };
+
+export * from "./RecoverableDeleteReceipt";

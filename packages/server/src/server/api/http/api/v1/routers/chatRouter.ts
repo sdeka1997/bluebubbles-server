@@ -10,9 +10,34 @@ import { MessageSerializer } from "@server/api/serializers/MessageSerializer";
 import { arrayHasOne } from "@server/utils/CollectionUtils";
 
 import { FileStream, Success } from "../responses/success";
-import { IMessageError, NotFound } from "../responses/errors";
+import { BadRequest, IMessageError, NotFound } from "../responses/errors";
 import { parseWithQuery } from "../utils";
 import { ChatSerializer } from "@server/api/serializers/ChatSerializer";
+import {
+    ReceiptBindingError,
+    ReceiptNotFoundError,
+    RecoverableDeleteReceipt,
+    RecoverableDeleteReceiptService
+} from "@server/services/recoverableDeleteReceiptService";
+import { TypeOrmRecoverableDeleteReceiptStore } from "@server/services/typeOrmRecoverableDeleteReceiptStore";
+
+let recoverableDeleteService: RecoverableDeleteReceiptService | null = null;
+const service = () => {
+    if (!recoverableDeleteService) {
+        recoverableDeleteService = new RecoverableDeleteReceiptService(
+            new TypeOrmRecoverableDeleteReceiptStore(Server().repo.recoverableDeleteReceipts()),
+            guid => ChatInterface.recoverableDelete(guid)
+        );
+    }
+    return recoverableDeleteService;
+};
+const publicReceipt = (receipt: RecoverableDeleteReceipt) => ({
+    attemptId: receipt.attemptId,
+    state: receipt.state,
+    createdAt: receipt.createdAt,
+    updatedAt: receipt.updatedAt,
+    version: receipt.version
+});
 
 export class ChatRouter {
     static async count(ctx: RouterContext, _: Next) {
@@ -311,8 +336,30 @@ export class ChatRouter {
 
     static async recoverableDeleteChat(ctx: RouterContext, _: Next): Promise<void> {
         const { guid } = ctx.params;
-        await ChatInterface.recoverableDelete(guid);
-        return new Success(ctx, { message: `Successfully recoverably deleted chat!` }).send();
+        const attemptId = ctx.request.body?.attemptId as string;
+        try {
+            const receipt = await service().submit(attemptId, guid);
+            return new Success(ctx, { message: "Recoverable deletion receipt", data: publicReceipt(receipt) }).send();
+        } catch (error) {
+            if (error instanceof ReceiptBindingError || (error as Error)?.message === "Invalid attemptId") {
+                throw new BadRequest({ error: (error as Error).message });
+            }
+            throw error;
+        }
+    }
+
+    static async recoverableDeleteStatus(ctx: RouterContext, _: Next): Promise<void> {
+        const { guid, attemptId } = ctx.params;
+        try {
+            const receipt = await service().status(attemptId, guid);
+            return new Success(ctx, { message: "Recoverable deletion receipt", data: publicReceipt(receipt) }).send();
+        } catch (error) {
+            if (error instanceof ReceiptNotFoundError) throw new NotFound({ error: error.message });
+            if (error instanceof ReceiptBindingError || (error as Error)?.message === "Invalid attemptId") {
+                throw new BadRequest({ error: (error as Error).message });
+            }
+            throw error;
+        }
     }
 
     static async deleteChat(ctx: RouterContext, _: Next): Promise<void> {

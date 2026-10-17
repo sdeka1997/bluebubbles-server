@@ -4,11 +4,12 @@ import { EventEmitter } from "events";
 import { DataSource } from "typeorm";
 import { Server } from "@server";
 import { isEmpty, isNotEmpty } from "@server/helpers/utils";
-import { Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage } from "./entity";
+import { Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage, RecoverableDeleteReceiptEntity } from "./entity";
 import { DEFAULT_DB_ITEMS } from "./constants";
 import { ContactTables1654432080899 } from "./migrations/1654432080899-ContactTables";
 import { ScheduledMessageTable1665083072000 } from "./migrations/1665083072000-ScheduledMessageTable";
 import { AddExternalIdToContacts1750299580000 } from "./migrations/1750299580000-AddExternalIdToContacts";
+import { RecoverableDeleteReceiptTable1760716800000 } from "./migrations/1760716800000-RecoverableDeleteReceiptTable";
 
 export type ServerConfig = { [key: string]: Date | string | boolean | number };
 export type ServerConfigChange = { prevConfig: ServerConfig; nextConfig: ServerConfig };
@@ -44,11 +45,12 @@ export class ServerRepository extends EventEmitter {
             name: "config",
             type: "better-sqlite3",
             database: dbPath,
-            entities: [Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage],
+            entities: [Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage, RecoverableDeleteReceiptEntity],
             migrations: [
                 ContactTables1654432080899,
                 ScheduledMessageTable1665083072000,
-                AddExternalIdToContacts1750299580000
+                AddExternalIdToContacts1750299580000,
+                RecoverableDeleteReceiptTable1760716800000
             ],
             migrationsRun: !shouldSync,
             migrationsTableName: "migrations",
@@ -89,6 +91,10 @@ export class ServerRepository extends EventEmitter {
      */
     configs() {
         return this.db.getRepository(Config);
+    }
+
+    recoverableDeleteReceipts() {
+        return this.db.getRepository(RecoverableDeleteReceiptEntity);
     }
 
     /**

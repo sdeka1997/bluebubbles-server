@@ -425,6 +425,12 @@ export class HttpRoutes {
                         controller: ChatRouter.recoverableDeleteChat
                     },
                     {
+                        method: HttpMethod.GET,
+                        path: ":guid/delete/recoverable/:attemptId",
+                        middleware: [...HttpRoutes.protected, PrivateApiMiddleware],
+                        controller: ChatRouter.recoverableDeleteStatus
+                    },
+                    {
                         method: HttpMethod.DELETE,
                         path: ":guid",
                         middleware: [...HttpRoutes.protected, PrivateApiMiddleware],

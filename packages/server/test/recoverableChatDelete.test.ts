@@ -38,23 +38,22 @@ test("chat interface guards recoverable deletion by private API and macOS versio
     assert.doesNotMatch(method, /privateApi\.chat\.delete\(/);
 });
 
-test("chat interface fails when the helper never received the recoverable delete", () => {
+test("chat interface keeps helper transport failure ambiguous", () => {
     const code = source("../src/server/api/interfaces/chatInterface.ts");
     const method = code.match(/static async recoverableDelete[\s\S]*?\n    \}/u)?.[0] ?? "";
 
-    // sendApiMessage returns null instead of throwing on socket write failure
     assert.match(method, /const result = await Server\(\)\.privateApi\.chat\.recoverableDelete\(guid\)/);
-    assert.match(method, /if \(!result\) \{\s*throw new Error\(/u);
+    assert.match(method, /if \(!result\) throw new Error\("Recoverable deletion outcome is unknown"\)/u);
+    assert.doesNotMatch(method, /definitiveFailure/u);
 });
 
-test("controller propagates recoverable deletion through its dedicated interface method", () => {
+test("controller submits through durable receipt service", () => {
     const code = source("../src/server/api/http/api/v1/routers/chatRouter.ts");
     const method = code.match(/static async recoverableDeleteChat[\s\S]*?\n    \}/u)?.[0] ?? "";
 
-    assert.match(method, /await ChatInterface\.recoverableDelete\(guid\)/);
-    assert.match(method, /Successfully recoverably deleted chat!/);
+    assert.match(method, /service\(\)\.submit\(attemptId, guid\)/);
+    assert.match(method, /publicReceipt\(receipt\)/);
     assert.doesNotMatch(method, /ChatInterface\.delete\(/);
-    assert.doesNotMatch(method, /catch\s*\(/, "errors must propagate to the HTTP error middleware");
 });
 
 test("HTTP routes dedicate POST /chat/:guid/delete/recoverable and preserve permanent DELETE", () => {

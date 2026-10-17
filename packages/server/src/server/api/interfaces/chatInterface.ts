@@ -366,18 +366,17 @@ export class ChatInterface {
         return retChat;
     }
 
-    static async recoverableDelete(guid: string): Promise<void> {
+    static async recoverableDelete(guid: string): Promise<"succeeded"> {
         checkPrivateApiStatus();
         if (!isMinVentura) {
             throw new Error("Recoverable chat deletion is only supported on macOS Ventura or newer!");
         }
 
-        // sendApiMessage swallows socket write failures and returns null, so a
-        // missing result means the helper never received the request.
+        // sendApiMessage returns null for transport/write failures and also swallows
+        // transaction errors. Neither proves that Apple did not apply the effect.
         const result = await Server().privateApi.chat.recoverableDelete(guid);
-        if (!result) {
-            throw new Error("Failed to send recoverable chat deletion to the Private API helper!");
-        }
+        if (!result) throw new Error("Recoverable deletion outcome is unknown");
+        return "succeeded";
     }
 
     static async delete({ chat, guid }: { chat?: Chat; guid?: string } = {}): Promise<void> {
