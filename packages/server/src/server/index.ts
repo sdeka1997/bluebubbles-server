@@ -651,6 +651,14 @@ class BlueBubblesServer extends EventEmitter {
             this.logger.info(`Failed to close Server Database connection! ${ex?.message ?? ex}`);
         }
 
+        try {
+            if (this.repo?.receiptDb?.isInitialized) {
+                await this.repo?.receiptDb?.destroy();
+            }
+        } catch (ex: any) {
+            this.logger.info(`Failed to close Delete Receipt Database connection! ${ex?.message ?? ex}`);
+        }
+
         this.logger.info("Finished stopping all server components...");
     }
 

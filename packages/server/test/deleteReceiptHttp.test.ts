@@ -8,6 +8,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
 import { AddressInfo } from "node:net";
+import { dirname } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
 // eslint-disable-next-line max-len
@@ -112,8 +113,8 @@ const submit = (body: unknown, password?: string | null) => request("POST", ATTE
 const status = (attemptId: string, password?: string | null) =>
     request("GET", `${ATTEMPTS}/${attemptId}`, { password });
 const receiptRow = (attemptId: string) =>
-    Server().repo.db.getRepository(RecoverableDeleteReceipt).findOneBy({ attemptId });
-const receiptCount = () => Server().repo.db.getRepository(RecoverableDeleteReceipt).count();
+    Server().repo.receiptDb.getRepository(RecoverableDeleteReceipt).findOneBy({ attemptId });
+const receiptCount = () => Server().repo.receiptDb.getRepository(RecoverableDeleteReceipt).count();
 const attempt = (label: string) => `http_${label}`.padEnd(24, "Q");
 
 before(async () => {
@@ -152,6 +153,7 @@ before(async () => {
 
 after(async () => {
     await new Promise(resolve => httpServer?.close(resolve));
+    await Server().repo?.receiptDb?.destroy();
     await Server().repo?.db?.destroy();
     rmSync(userDataDir, { recursive: true, force: true });
 });
@@ -164,28 +166,43 @@ beforeEach(() => {
     connectHelper();
 });
 
-test("real server repository registers the receipt entity and migration", async () => {
-    const { options } = Server().repo.db;
-    assert.ok((options.entities as unknown[]).includes(RecoverableDeleteReceipt));
-    const migrations = options.migrations as Array<new () => { name: string }>;
-    assert.ok(migrations.includes(RecoverableDeleteReceiptTable));
-    const names = migrations.map(Migration => new Migration().name);
-    const stamps = names.map(name => Number(name.match(/(\d{13})$/)?.[1]));
+test("real server repository keeps receipts in their own migrated SQLite file", async () => {
+    const { db, receiptDb } = Server().repo;
+    assert.notEqual(receiptDb, db);
+    assert.ok(receiptDb.isInitialized);
+    assert.notEqual(receiptDb.options.database, db.options.database);
+    assert.equal(dirname(receiptDb.options.database as string), dirname(db.options.database as string));
+
+    // Receipts are absent from the main DataSource, so no main-database transaction can capture them
+    assert.ok(!(db.options.entities as unknown[]).includes(RecoverableDeleteReceipt));
+    assert.ok(!(db.options.migrations as unknown[]).includes(RecoverableDeleteReceiptTable));
+    assert.equal(await db.createQueryRunner().hasTable("recoverable_delete_receipt"), false);
+    const mainNames = (db.options.migrations as Array<new () => { name: string }>).map(
+        Migration => new Migration().name
+    );
+    const mainStamps = mainNames.map(name => Number(name.match(/(\d{13})$/)?.[1]));
     assert.deepEqual(
-        [...stamps].sort((a, b) => a - b),
-        stamps,
+        [...mainStamps].sort((a, b) => a - b),
+        mainStamps,
         "migrations must stay in timestamp order"
     );
-    assert.equal(new Set(names).size, names.length);
+    assert.equal(new Set(mainNames).size, mainNames.length);
 
-    // The table produced for fresh installs (synchronize) is the one the migration creates
-    assert.equal(await Server().repo.db.createQueryRunner().hasTable("recoverable_delete_receipt"), true);
-    const schemaDiff = await Server().repo.db.driver.createSchemaBuilder().log();
+    assert.deepEqual(receiptDb.options.entities, [RecoverableDeleteReceipt]);
+    assert.deepEqual(receiptDb.options.migrations, [RecoverableDeleteReceiptTable]);
+    assert.deepEqual(
+        (await receiptDb.query(`SELECT name FROM migrations`)).map((row: { name: string }) => row.name),
+        [new RecoverableDeleteReceiptTable().name]
+    );
+
+    // The migrated table is exactly what the entity describes, and re-running the migration is harmless
+    assert.equal(await receiptDb.createQueryRunner().hasTable("recoverable_delete_receipt"), true);
+    const schemaDiff = await receiptDb.driver.createSchemaBuilder().log();
     assert.deepEqual(
         schemaDiff.upQueries.map(query => query.query),
         []
     );
-    await new RecoverableDeleteReceiptTable().up(Server().repo.db.createQueryRunner());
+    await new RecoverableDeleteReceiptTable().up(receiptDb.createQueryRunner());
 });
 
 test("submit dispatches once through the real helper path and status reports it", async () => {
@@ -314,7 +331,7 @@ test("status works while the helper is offline; submit keeps its auth and helper
 });
 
 test("real ChatInterface classification: typed pre-dispatch vs ambiguous failures", async () => {
-    const service = new ReceiptModule.RecoverableDeleteReceiptService(Server().repo.db);
+    const service = new ReceiptModule.RecoverableDeleteReceiptService(Server().repo.receiptDb);
     const run = (label: string) =>
         service.submit(attempt(label), CHAT, () => ChatInterface.recoverableDeleteForReceipt(CHAT));
 

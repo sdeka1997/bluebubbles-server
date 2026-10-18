@@ -1,20 +1,12 @@
 import fs from "fs";
+import path from "path";
 import { app } from "electron";
 import { EventEmitter } from "events";
 import { DataSource } from "typeorm";
 import { Server } from "@server";
 import { isEmpty, isNotEmpty } from "@server/helpers/utils";
-import {
-    Config,
-    Alert,
-    Device,
-    Queue,
-    Webhook,
-    Contact,
-    ContactAddress,
-    ScheduledMessage,
-    RecoverableDeleteReceipt
-} from "./entity";
+import { Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage } from "./entity";
+import { RecoverableDeleteReceipt } from "./entity/RecoverableDeleteReceipt";
 import { DEFAULT_DB_ITEMS } from "./constants";
 import { ContactTables1654432080899 } from "./migrations/1654432080899-ContactTables";
 import { ScheduledMessageTable1665083072000 } from "./migrations/1665083072000-ScheduledMessageTable";
@@ -27,12 +19,19 @@ export type ServerConfigChange = { prevConfig: ServerConfig; nextConfig: ServerC
 export class ServerRepository extends EventEmitter {
     db: DataSource = null;
 
+    // Delete-attempt receipts live in their own SQLite file. better-sqlite3 gives each DataSource
+    // a single shared connection, so receipt writes on the main DataSource could silently join an
+    // unrelated open transaction and not be committed before the helper is dispatched.
+    // Nothing may open a transaction (or use save()) on this DataSource.
+    receiptDb: DataSource = null;
+
     config: ServerConfig;
 
     constructor() {
         super();
 
         this.db = null;
+        this.receiptDb = null;
         this.config = {};
     }
 
@@ -42,6 +41,7 @@ export class ServerRepository extends EventEmitter {
         // If the DB is set, but not connected, try to connect
         if (this.db) {
             if (!this.db.isInitialized) await this.db.initialize();
+            if (this.receiptDb && !this.receiptDb.isInitialized) await this.receiptDb.initialize();
             return this.db;
         }
 
@@ -55,22 +55,11 @@ export class ServerRepository extends EventEmitter {
             name: "config",
             type: "better-sqlite3",
             database: dbPath,
-            entities: [
-                Config,
-                Alert,
-                Device,
-                Queue,
-                Webhook,
-                Contact,
-                ContactAddress,
-                ScheduledMessage,
-                RecoverableDeleteReceipt
-            ],
+            entities: [Config, Alert, Device, Queue, Webhook, Contact, ContactAddress, ScheduledMessage],
             migrations: [
                 ContactTables1654432080899,
                 ScheduledMessageTable1665083072000,
-                AddExternalIdToContacts1750299580000,
-                RecoverableDeleteReceiptTable1760659200000
+                AddExternalIdToContacts1750299580000
             ],
             migrationsRun: !shouldSync,
             migrationsTableName: "migrations",
@@ -78,6 +67,19 @@ export class ServerRepository extends EventEmitter {
         });
 
         this.db = await this.db.initialize();
+
+        // The receipt migration is idempotent and matches the entity, so always migrate (never synchronize)
+        this.receiptDb = new DataSource({
+            name: "deleteReceipts",
+            type: "better-sqlite3",
+            database: path.join(path.dirname(dbPath), "delete-receipts.db"),
+            entities: [RecoverableDeleteReceipt],
+            migrations: [RecoverableDeleteReceiptTable1760659200000],
+            migrationsRun: true,
+            migrationsTableName: "migrations",
+            synchronize: false
+        });
+        this.receiptDb = await this.receiptDb.initialize();
 
         // Load default config items
         await this.loadConfig();

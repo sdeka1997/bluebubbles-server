@@ -58,7 +58,9 @@ const toView = (receipt: RecoverableDeleteReceipt): RecoverableDeleteReceiptView
 /**
  * Records recoverable chat deletes so a client can learn whether an attempt was dispatched.
  * Receipts never expire and are never retried; ambiguous outcomes stay pending.
- * Kept free of the Electron-bound server singleton so it can run against any DataSource.
+ * Kept free of the Electron-bound server singleton so it can run against any DataSource, which must
+ * be dedicated to receipts: on a shared better-sqlite3 DataSource the pending insert can join another
+ * caller's open transaction and be uncommitted at dispatch (or rolled back afterwards).
  */
 export class RecoverableDeleteReceiptService {
     private readonly db: DataSource;

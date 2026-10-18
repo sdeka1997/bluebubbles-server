@@ -1,9 +1,15 @@
+// Electron stand-in, so the real ServerRepository and router can be loaded under plain Node
+import { userDataDir } from "./support/electronStub";
+
 import "reflect-metadata";
 import assert from "node:assert/strict";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 import { DataSource } from "typeorm";
 
 import { RecoverableDeleteReceipt } from "../src/server/databases/server/entity/RecoverableDeleteReceipt";
@@ -171,6 +177,108 @@ test("pending is committed and visible to another connection while the helper is
             await observer.destroy();
         }
     });
+});
+
+test("pending commits before dispatch even while the main server database has a transaction open", async () => {
+    mkdirSync(`${userDataDir}/bluebubbles-server`, { recursive: true });
+    // Load through require so the test shares one module graph with the server's own requires
+    const load = createRequire(import.meta.url);
+    const { Server } = load("../src/server");
+    const { ServerRepository } = load("../src/server/databases/server");
+    const { Config } = load("../src/server/databases/server/entity");
+    const { ChatInterface } = load("../src/server/api/interfaces/chatInterface");
+    const { ChatRouter } = load("../src/server/api/http/api/v1/routers/chatRouter");
+
+    const server = Server();
+    server.log = () => undefined;
+    server.repo = new ServerRepository();
+    await server.repo.initialize();
+    const dataDir = dirname(server.repo.db.options.database as string);
+
+    // Fresh connections to every SQLite file the server keeps, so only committed rows are seen
+    const committedReceipt = (attemptId: string) => {
+        for (const file of readdirSync(dataDir).filter(name => name.endsWith(".db"))) {
+            const reader = new Database(join(dataDir, file), { readonly: true, fileMustExist: true });
+            try {
+                const table = reader
+                    .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recoverable_delete_receipt'`)
+                    .get();
+                if (!table) continue;
+                const row = reader
+                    .prepare(`SELECT state FROM recoverable_delete_receipt WHERE attempt_id = ?`)
+                    .get(attemptId) as { state: string } | undefined;
+                if (row) return row;
+            } finally {
+                reader.close();
+            }
+        }
+        return null;
+    };
+
+    const id = attempt("maintxn");
+    const original = ChatInterface.recoverableDeleteForReceipt;
+    let dispatches = 0;
+    let committedAtDispatch: { state: string } | null = null;
+    ChatInterface.recoverableDeleteForReceipt = async () => {
+        dispatches += 1;
+        committedAtDispatch = committedReceipt(id);
+    };
+    const routeContext = (): any => ({ request: { body: { chatGuid: CHAT, attemptId: id } }, params: { attemptId: id } });
+    const next = async () => undefined;
+
+    try {
+        // An ordinary server write (the same save() path config, contacts and webhooks use) holds
+        // the main DataSource's transaction open while a delete attempt arrives
+        let openTransaction: () => void;
+        const transactionOpen = new Promise<void>(resolve => {
+            openTransaction = resolve;
+        });
+        let rollBack: () => void;
+        const rollBackRequested = new Promise<void>(resolve => {
+            rollBack = resolve;
+        });
+        const unrelatedWrite = server.repo.db.transaction(async (manager: any) => {
+            await manager.save(manager.create(Config, { name: "receipt_isolation_probe", value: "1" }));
+            openTransaction();
+            await rollBackRequested;
+            throw new Error("unrelated write rolled back");
+        });
+        await transactionOpen;
+
+        const submitted = routeContext();
+        await ChatRouter.submitRecoverableDeleteAttempt(submitted, next);
+        rollBack!();
+        await assert.rejects(unrelatedWrite, /unrelated write rolled back/);
+        assert.equal(await server.repo.configs().countBy({ name: "receipt_isolation_probe" }), 0);
+
+        assert.equal(submitted.status, 200);
+        assert.equal(submitted.body.data.state, "succeeded");
+        assert.equal(dispatches, 1);
+        assert.equal(
+            committedAtDispatch?.state,
+            "pending",
+            "pending receipt was not committed (invisible to an independent connection) at dispatch"
+        );
+        assert.equal(
+            committedReceipt(id)?.state,
+            "succeeded",
+            "receipt was lost when an unrelated main-database transaction rolled back"
+        );
+
+        // The applied delete stays answerable and a retry does not dispatch again
+        const status = routeContext();
+        await ChatRouter.getRecoverableDeleteAttempt(status, next);
+        assert.equal(status.body.data.state, "succeeded");
+        const retried = routeContext();
+        await ChatRouter.submitRecoverableDeleteAttempt(retried, next);
+        assert.equal(retried.body.data.state, "succeeded");
+        assert.equal(dispatches, 1);
+    } finally {
+        ChatInterface.recoverableDeleteForReceipt = original;
+        if (server.repo.receiptDb?.isInitialized) await server.repo.receiptDb.destroy();
+        if (server.repo.db?.isInitialized) await server.repo.db.destroy();
+        rmSync(userDataDir, { recursive: true, force: true });
+    }
 });
 
 test("a failed pending insert never invokes the helper", async () => {

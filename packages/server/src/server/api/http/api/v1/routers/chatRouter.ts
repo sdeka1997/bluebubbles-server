@@ -321,7 +321,7 @@ export class ChatRouter {
 
     static async submitRecoverableDeleteAttempt(ctx: RouterContext, _: Next): Promise<void> {
         const { chatGuid, attemptId } = ctx.request.body as { chatGuid: string; attemptId: string };
-        const receipts = new RecoverableDeleteReceiptService(Server().repo.db, message =>
+        const receipts = new RecoverableDeleteReceiptService(Server().repo.receiptDb, message =>
             Server().log(message, "debug")
         );
 
@@ -341,7 +341,7 @@ export class ChatRouter {
 
     static async getRecoverableDeleteAttempt(ctx: RouterContext, _: Next): Promise<void> {
         const { attemptId } = ctx.params;
-        const receipt = await new RecoverableDeleteReceiptService(Server().repo.db).get(attemptId);
+        const receipt = await new RecoverableDeleteReceiptService(Server().repo.receiptDb).get(attemptId);
         if (!receipt) throw new NotFound({ error: "No receipt exists for this attemptId" });
         return new Success(ctx, { message: "Recoverable delete attempt receipt", data: receipt }).send();
     }
