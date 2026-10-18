@@ -3,6 +3,7 @@ import { Next } from "koa";
 
 import { ValidateInput } from "./index";
 import { BadRequest } from "../responses/errors";
+import { isValidRecoverableDeleteAttemptId } from "@server/services/RecoverableDeleteReceiptService";
 
 export class ChatValidator {
     static getMessagesRules = {
@@ -71,6 +72,27 @@ export class ChatValidator {
         const icon = files?.icon as unknown as File;
         if (!icon || icon.size === 0) {
             throw new BadRequest({ error: "Icon not provided or was empty!" });
+        }
+
+        await next();
+    }
+
+    // Chat GUIDs travel in the body (not the URL) so the request log never records them
+    static async validateRecoverableDeleteAttempt(ctx: RouterContext, next: Next) {
+        const { chatGuid, attemptId } = (ctx?.request?.body ?? {}) as Record<string, unknown>;
+        if (typeof chatGuid !== "string" || chatGuid.length === 0 || chatGuid.length > 1024) {
+            throw new BadRequest({ error: "A chatGuid string (1-1024 characters) is required!" });
+        }
+        if (!isValidRecoverableDeleteAttemptId(attemptId)) {
+            throw new BadRequest({ error: "attemptId must be a 16-128 character base64url string!" });
+        }
+
+        await next();
+    }
+
+    static async validateRecoverableDeleteAttemptId(ctx: RouterContext, next: Next) {
+        if (!isValidRecoverableDeleteAttemptId(ctx?.params?.attemptId)) {
+            throw new BadRequest({ error: "attemptId must be a 16-128 character base64url string!" });
         }
 
         await next();

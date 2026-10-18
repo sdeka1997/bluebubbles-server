@@ -10,7 +10,11 @@ import { MessageSerializer } from "@server/api/serializers/MessageSerializer";
 import { arrayHasOne } from "@server/utils/CollectionUtils";
 
 import { FileStream, Success } from "../responses/success";
-import { IMessageError, NotFound } from "../responses/errors";
+import { Conflict, IMessageError, NotFound } from "../responses/errors";
+import {
+    DeleteAttemptConflictError,
+    RecoverableDeleteReceiptService
+} from "@server/services/RecoverableDeleteReceiptService";
 import { parseWithQuery } from "../utils";
 import { ChatSerializer } from "@server/api/serializers/ChatSerializer";
 
@@ -313,6 +317,33 @@ export class ChatRouter {
         const { guid } = ctx.params;
         await ChatInterface.recoverableDelete(guid);
         return new Success(ctx, { message: `Successfully recoverably deleted chat!` }).send();
+    }
+
+    static async submitRecoverableDeleteAttempt(ctx: RouterContext, _: Next): Promise<void> {
+        const { chatGuid, attemptId } = ctx.request.body as { chatGuid: string; attemptId: string };
+        const receipts = new RecoverableDeleteReceiptService(Server().repo.db, message =>
+            Server().log(message, "debug")
+        );
+
+        try {
+            const receipt = await receipts.submit(attemptId, chatGuid, () =>
+                ChatInterface.recoverableDeleteForReceipt(chatGuid)
+            );
+            return new Success(ctx, { message: "Recoverable delete attempt recorded", data: receipt }).send();
+        } catch (ex: any) {
+            if (ex instanceof DeleteAttemptConflictError) {
+                throw new Conflict({ error: "This attemptId is already bound to a different chat!" });
+            }
+
+            throw ex;
+        }
+    }
+
+    static async getRecoverableDeleteAttempt(ctx: RouterContext, _: Next): Promise<void> {
+        const { attemptId } = ctx.params;
+        const receipt = await new RecoverableDeleteReceiptService(Server().repo.db).get(attemptId);
+        if (!receipt) throw new NotFound({ error: "No receipt exists for this attemptId" });
+        return new Success(ctx, { message: "Recoverable delete attempt receipt", data: receipt }).send();
     }
 
     static async deleteChat(ctx: RouterContext, _: Next): Promise<void> {

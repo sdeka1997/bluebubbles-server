@@ -21,6 +21,7 @@ import { ChatSerializer } from "../serializers/ChatSerializer";
 import { Attachment } from "@server/databases/imessage/entity/Attachment";
 import { Message } from "@server/databases/imessage/entity/Message";
 import { MessageSerializer } from "../serializers/MessageSerializer";
+import { RecoverableDeletePreDispatchError } from "@server/services/RecoverableDeleteReceiptService";
 
 export class ChatInterface {
     static async get({
@@ -378,6 +379,28 @@ export class ChatInterface {
         if (!result) {
             throw new Error("Failed to send recoverable chat deletion to the Private API helper!");
         }
+    }
+
+    /**
+     * Recoverable delete for receipt-tracked attempts. Only the checks below run before
+     * anything is written to the helper, so only they are reported as typed pre-dispatch
+     * failures. Anything thrown by recoverableDelete itself is an unknown outcome.
+     */
+    static async recoverableDeleteForReceipt(guid: string): Promise<void> {
+        try {
+            checkPrivateApiStatus();
+        } catch (ex: any) {
+            throw new RecoverableDeletePreDispatchError("privateApiUnavailable", ex?.message ?? String(ex));
+        }
+
+        if (!isMinVentura) {
+            throw new RecoverableDeletePreDispatchError(
+                "unsupportedMacOS",
+                "Recoverable chat deletion is only supported on macOS Ventura or newer!"
+            );
+        }
+
+        await ChatInterface.recoverableDelete(guid);
     }
 
     static async delete({ chat, guid }: { chat?: Chat; guid?: string } = {}): Promise<void> {

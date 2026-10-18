@@ -425,6 +425,20 @@ export class HttpRoutes {
                         controller: ChatRouter.recoverableDeleteChat
                     },
                     {
+                        method: HttpMethod.POST,
+                        path: "delete/recoverable/attempts",
+                        middleware: [...HttpRoutes.protected, PrivateApiMiddleware],
+                        validators: [ChatValidator.validateRecoverableDeleteAttempt],
+                        controller: ChatRouter.submitRecoverableDeleteAttempt
+                    },
+                    {
+                        // Deliberately not behind PrivateApiMiddleware: must work while the helper is offline
+                        method: HttpMethod.GET,
+                        path: "delete/recoverable/attempts/:attemptId",
+                        validators: [ChatValidator.validateRecoverableDeleteAttemptId],
+                        controller: ChatRouter.getRecoverableDeleteAttempt
+                    },
+                    {
                         method: HttpMethod.DELETE,
                         path: ":guid",
                         middleware: [...HttpRoutes.protected, PrivateApiMiddleware],

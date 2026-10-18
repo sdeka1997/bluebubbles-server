@@ -72,6 +72,20 @@ export class NotFound extends HTTPError {
     }
 }
 
+export class Conflict extends HTTPError {
+    constructor(response?: ResponseParams) {
+        super({
+            status: 409,
+            message: response?.message ?? "The request conflicts with the current state of the resource",
+            error: {
+                type: ErrorTypes.VALIDATION_ERROR,
+                message: response?.error ?? ResponseMessages.CONFLICT
+            },
+            data: response?.data
+        });
+    }
+}
+
 export class ServerError extends HTTPError {
     constructor(response?: ResponseParams) {
         super({
