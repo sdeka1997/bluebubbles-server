@@ -372,12 +372,7 @@ export class ChatInterface {
             throw new Error("Recoverable chat deletion is only supported on macOS Ventura or newer!");
         }
 
-        // sendApiMessage swallows socket write failures and returns null, so a
-        // missing result means the helper never received the request.
-        const result = await Server().privateApi.chat.recoverableDelete(guid);
-        if (!result) {
-            throw new Error("Failed to send recoverable chat deletion to the Private API helper!");
-        }
+        await Server().privateApi.chat.recoverableDelete(guid);
     }
 
     static async delete({ chat, guid }: { chat?: Chat; guid?: string } = {}): Promise<void> {
