@@ -7,13 +7,34 @@ import { GeneralInterface } from "@server/api/interfaces/generalInterface";
 import { Success } from "../responses/success";
 import { AlertsInterface } from "@server/api/interfaces/alertsInterface";
 import { isEmpty, isTruthyBool } from "@server/helpers/utils";
-import { BadRequest } from "../responses/errors";
+import { BadRequest, ServerError } from "../responses/errors";
+import { isMinVentura } from "@server/env";
+import { supportsRecoverableMessages } from "@server/databases/imessage/snapshot/RecoverableMessageSnapshot";
 import { autoUpdater } from "electron-updater";
 import { SERVER_UPDATE_DOWNLOADING } from "@server/events";
 
 export class ServerRouter {
     static async getInfo(ctx: RouterContext, _: Next) {
         return new Success(ctx, { data: await GeneralInterface.getServerMetadata() }).send();
+    }
+
+    static async getRecoverableMessageSnapshot(ctx: RouterContext, _: Next) {
+        if (!supportsRecoverableMessages(isMinVentura)) {
+            throw new BadRequest({
+                message: "Recently Deleted requires macOS Ventura or later!",
+                error: "UNSUPPORTED_MACOS_VERSION"
+            });
+        }
+
+        try {
+            const result = await Server().getRecoverableMessageSnapshot();
+            return new Success(ctx, { data: result }).send();
+        } catch (ex: any) {
+            throw new ServerError({
+                message: "Failed to build recoverable message snapshot!",
+                error: ex?.message ?? ex.toString()
+            });
+        }
     }
 
     static async checkForUpdate(ctx: RouterContext, _: Next) {
