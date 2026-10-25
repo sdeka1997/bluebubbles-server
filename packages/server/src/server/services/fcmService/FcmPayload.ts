@@ -10,6 +10,8 @@ export const FCM_MAX_DATA_BYTES = 4096;
 const MESSAGE_EVENT_TYPES = new Set([
     "new-message",
     "updated-message",
+    // Carries the full message plus chats, exactly like new-message.
+    "message-send-error",
     "group-name-change",
     "participant-removed",
     "participant-added",
@@ -239,6 +241,8 @@ export function boundFcmDataPayload(value: unknown): FcmDataPayload | null {
     }
 
     const isKnownMessageEvent = MESSAGE_EVENT_TYPES.has(value.type);
+    // A known message event that cannot be routed to a chat on the client is
+    // dropped even when small: the client would have nowhere to put it.
     if (isKnownMessageEvent && !isMessagePayload(decoded, value.type !== "updated-message")) return null;
     if (fits(value)) return { ...value };
 
