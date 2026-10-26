@@ -26,8 +26,11 @@ export class FindMyFriendsCache {
         if (!force && now - this.rosterLoadedAt < ROSTER_RELOAD_MS) return;
         this.rosterLoadedAt = now;
         const roster = this.loadRoster();
-        if (!roster) return;
+        if (roster) this.setRoster(roster);
+    }
 
+    /** Makes `roster` authoritative and removes cached rows Apple no longer lists. */
+    setRoster(roster: FindMyRoster): void {
         const previous = Object.values(this.cache);
         this.roster = roster;
         this.cache = {};
