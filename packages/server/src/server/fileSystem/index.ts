@@ -129,6 +129,25 @@ export class FileSystem {
         "FriendCacheData.data"
     );
 
+    // FMF cache (friend roster and contacts, ChaCha20-Poly1305 encrypted on macOS 14.4+)
+    public static findMyFmfCacheDir = path.join(userHomeDir(), "Library", "Caches", "com.apple.findmy.fmfcore");
+
+    // Encrypted SQLite database that holds friend coordinates on macOS 14.4+
+    public static findMyLocalStorageDir = path.join(
+        userHomeDir(),
+        "Library",
+        "Group Containers",
+        "group.com.apple.findmy.findmylocateagent",
+        "Library",
+        "Application Support"
+    );
+
+    public static findMyLocalStorageDbPath = path.join(FileSystem.findMyLocalStorageDir, "LocalStorage.db");
+
+    // Where BlueBubbles keeps the user-imported Find My decryption keys. Not created by
+    // setupDirectories(): the key manager creates it with restrictive permissions on import.
+    public static findMyKeysDir = path.join(FileSystem.baseDir, "FindMyKeys");
+
     public static get usingCustomFcm(): boolean {
         const fcmClient = Server().args["fcm-client"];
         const fcmServer = Server().args["fcm-server"];
