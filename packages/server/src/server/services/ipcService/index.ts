@@ -1,6 +1,7 @@
 import { app, dialog, ipcMain, systemPreferences, shell } from "electron";
 import { askForAccessibilityAccess, askForFullDiskAccess } from "node-mac-permissions";
 import process from "process";
+import * as macosVersion from "macos-version";
 
 import { Server } from "@server";
 import { FileSystem } from "@server/fileSystem";
@@ -13,6 +14,7 @@ import { getContactPermissionStatus, requestContactPermission } from "@server/ut
 import { ScheduledMessagesInterface } from "@server/api/interfaces/scheduledMessagesInterface";
 import { ChatInterface } from "@server/api/interfaces/chatInterface";
 import { GeneralInterface } from "@server/api/interfaces/generalInterface";
+import { getFindMyKeysStatus, importFindMyKeys } from "@server/api/lib/findmy/FindMyKeyIpc";
 import {
     isMinBigSur,
     isMinCatalina,
@@ -138,6 +140,26 @@ export class IPCService extends Loggable {
 
         ipcMain.handle("reinstall-helper-bundle", async (_, __) => {
             return await Server().privateApi.modeType.install(true);
+        });
+
+        ipcMain.handle("get-findmy-keys-status", async (_, __) => {
+            // macOS 14.4 is where Apple started encrypting the Find My cache
+            return await getFindMyKeysStatus(macosVersion.isGreaterThanOrEqualTo("14.4"));
+        });
+
+        ipcMain.handle("import-findmy-keys", async (_, __) => {
+            return await importFindMyKeys(async () => {
+                const options: Electron.OpenDialogOptions = {
+                    title: "Select the folder containing your Find My keys",
+                    message:
+                        "Select the folder that contains LocalStorage.key, FMIPDataManager.bplist, " +
+                        "and FMFDataManager.bplist.",
+                    properties: ["openDirectory"]
+                };
+                const win = Server().window;
+                const picked = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+                return picked.canceled || picked.filePaths.length === 0 ? null : picked.filePaths[0];
+            });
         });
 
         ipcMain.handle("get-fcm-server", (event, args) => {
