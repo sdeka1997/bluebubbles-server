@@ -5,6 +5,7 @@ import { SERVER_UPDATE } from "@server/events";
 import { ScheduledService } from "@server/lib/ScheduledService";
 import { Loggable } from "@server/lib/logging/Loggable";
 import axios, { AxiosResponse } from "axios";
+import { OFFICIAL_UPDATES_ENABLED, officialUpdateDisabledMessage } from "./customBuildPolicy";
 
 export class UpdateService extends Loggable {
     tag = "UpdateService";
@@ -36,6 +37,11 @@ export class UpdateService extends Loggable {
     }
 
     start() {
+        if (!OFFICIAL_UPDATES_ENABLED) {
+            this.log.info(officialUpdateDisabledMessage());
+            return;
+        }
+
         if (this.timer) return;
         this.timer = new ScheduledService(async () => {
             if (this.hasUpdate) return;
@@ -52,6 +58,23 @@ export class UpdateService extends Loggable {
     }
 
     async checkForUpdate({ showNoUpdateDialog = false, showUpdateDialog = true } = {}): Promise<boolean> {
+        if (!OFFICIAL_UPDATES_ENABLED) {
+            this.hasUpdate = false;
+            this.updateInfo = null;
+            this.log.info(officialUpdateDisabledMessage());
+
+            if (showNoUpdateDialog) {
+                dialog.showMessageBox(this.window, {
+                    type: "info",
+                    title: "Custom BlueBubbles Build",
+                    message: "Official one-click updates are disabled.",
+                    detail: officialUpdateDisabledMessage()
+                });
+            }
+
+            return false;
+        }
+
         let releasesRes: AxiosResponse<any, any>;
 
         try {
