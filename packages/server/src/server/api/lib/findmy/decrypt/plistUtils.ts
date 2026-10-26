@@ -31,11 +31,16 @@ export const parsePlistBuffer = (buffer: Buffer): any => {
 };
 
 /**
- * Read a plist file (binary or XML). The path is opened without following symlinks and must
- * be a regular file within MAX_PLIST_BYTES: a symlink to a device would otherwise block the
+ * Read a plist file (binary or XML) through readCacheFile.
+ */
+export const parsePlistFile = (filePath: string): any => parsePlistBuffer(readCacheFile(filePath));
+
+/**
+ * Read a Find My cache or key file. The path is opened without following symlinks and must be
+ * a regular file within MAX_PLIST_BYTES: a symlink to a device would otherwise block the
  * synchronous read forever.
  */
-export const parsePlistFile = (filePath: string): any => {
+export const readCacheFile = (filePath: string): Buffer => {
     let fd: number;
     try {
         fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -48,7 +53,7 @@ export const parsePlistFile = (filePath: string): any => {
         const stat = fs.fstatSync(fd);
         if (!stat.isFile()) throw new Error(`plist is not a regular file: ${filePath}`);
         if (stat.size > MAX_PLIST_BYTES) throw new Error(`plist too large (${stat.size} bytes)`);
-        return parsePlistBuffer(fs.readFileSync(fd));
+        return fs.readFileSync(fd);
     } finally {
         fs.closeSync(fd);
     }

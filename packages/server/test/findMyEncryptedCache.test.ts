@@ -17,6 +17,7 @@ import {
     parsePlistBuffer,
     parsePlistFile
 } from "../src/server/api/lib/findmy/decrypt/plistUtils";
+import { readFmfRosterData } from "../src/server/api/lib/findmy/decrypt/fmfReader";
 
 const KEY = Buffer.alloc(32, 0x11);
 const NONCE = Buffer.alloc(12, 0x22);
@@ -127,6 +128,38 @@ test("parsePlistFile reads a regular file but refuses symlinks and directories",
         assert.deepEqual(parsePlistFile(file), { symmetricKey: "abc" });
         assert.throws(() => parsePlistFile(path.join(dir, "link.plist")), /not a regular file/);
         assert.throws(() => parsePlistFile(dir), /not a regular file/);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("readFmfRosterData returns the complete decrypted FMF payload, not just names", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "findmy-fmf-test-"));
+    try {
+        fs.writeFileSync(path.join(dir, "FriendCacheData.data"), cacheFile(seal(FMF_PAYLOAD)));
+
+        const data = readFmfRosterData(KEY, dir);
+
+        assert.deepEqual(Object.keys(data).sort(), ["contacts", "following", "myInfo"]);
+        assert.deepEqual(data.following[0], {
+            id: "friend-1",
+            invitationAcceptedHandles: ["dad@example.com"],
+            nested: [null, { deep: null }]
+        });
+        assert.deepEqual(data.contacts["friend-1~"], { displayName: "Dad", shortName: null });
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("readFmfRosterData refuses a symlinked cache file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "findmy-fmf-test-"));
+    try {
+        const real = path.join(dir, "elsewhere.data");
+        fs.writeFileSync(real, cacheFile(seal(FMF_PAYLOAD)));
+        fs.symlinkSync(real, path.join(dir, "FriendCacheData.data"));
+
+        assert.throws(() => readFmfRosterData(KEY, dir), /not a regular file/);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
