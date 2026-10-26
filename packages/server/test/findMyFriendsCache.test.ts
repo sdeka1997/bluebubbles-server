@@ -122,3 +122,87 @@ test("authoritative roster keeps friends who currently have no location", () => 
     assert.equal(missing?.status, "legacy");
     assert.equal(missing?.title, "friend-2");
 });
+
+test("setRoster keeps current locations of friends still on the roster", () => {
+    const cache = new FindMyFriendsCache(() => rosterFor(["friend-1"]));
+    cache.refreshRoster(true);
+    cache.add(location("current@example.com", { last_updated: 5 }));
+
+    cache.setRoster(rosterFor(["friend-1", "friend-2"]));
+
+    const kept = cache.get("old@example.edu");
+    assert.deepEqual(kept, {
+        ...location("current@example.com", { title: "Current Name", last_updated: 5 }),
+        favorite_order: 0
+    });
+});
+
+test("setRoster removes friends who stopped sharing", () => {
+    const cache = new FindMyFriendsCache();
+    cache.setRoster(rosterFor(["friend-1", "friend-2"]));
+    cache.add(location("current@example.com"));
+    cache.add(location("friend-2@example.com"));
+
+    cache.setRoster(rosterFor(["friend-1"]));
+
+    assert.deepEqual(cache.getAll().map(item => item.handle), ["current@example.com"]);
+    assert.equal(cache.get("friend-2@example.com"), null);
+});
+
+test("setRoster lists roster friends without a location as placeholders", () => {
+    const cache = new FindMyFriendsCache();
+    cache.setRoster(rosterFor(["friend-1", "friend-2"]));
+
+    assert.deepEqual(cache.get("friend-2@example.com"), {
+        handle: "friend-2@example.com",
+        coordinates: [0, 0],
+        long_address: null,
+        short_address: null,
+        subtitle: null,
+        title: "friend-2",
+        last_updated: 0,
+        is_locating_in_progress: false,
+        status: "legacy"
+    });
+    assert.equal(cache.hasAnyLocation(), false);
+});
+
+test("an encrypted-path primary handle merges with a row cached under an old alias", () => {
+    const cache = new FindMyFriendsCache();
+    cache.setRoster(rosterFor(["friend-1"]));
+    cache.add(location("old@example.edu", { status: "legacy", last_updated: 1 }));
+
+    const emitted = cache.addAll([location("current@example.com", { last_updated: 2 })]);
+
+    assert.equal(cache.getAll().length, 1);
+    assert.equal(emitted[0].handle, "current@example.com");
+    assert.equal(emitted[0].alternate_handles, undefined);
+    assert.equal(cache.get("old@example.edu")?.last_updated, 2);
+});
+
+test("legacy refreshRoster still reloads at most every 30 s unless forced", () => {
+    let loads = 0;
+    const cache = new FindMyFriendsCache(() => {
+        loads += 1;
+        return rosterFor(["friend-1"]);
+    });
+    cache.refreshRoster(false, 1000);
+    cache.refreshRoster(false, 2000);
+    cache.refreshRoster(true, 3000);
+    cache.refreshRoster(false, 40000);
+
+    assert.equal(loads, 3);
+});
+
+test("legacy refreshRoster keeps the previous roster when Apple's file is unreadable", () => {
+    let roster: FindMyRoster | null = rosterFor(["friend-1"]);
+    const cache = new FindMyFriendsCache(() => roster);
+    cache.refreshRoster(true);
+    cache.add(location("current@example.com", { last_updated: 3 }));
+
+    roster = null;
+    cache.refreshRoster(true);
+
+    assert.equal(cache.get("old@example.edu")?.last_updated, 3);
+    assert.deepEqual(cache.addAll([location("stranger@example.com")]), []);
+});
