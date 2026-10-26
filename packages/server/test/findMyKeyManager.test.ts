@@ -255,3 +255,182 @@ test("if the rollback itself fails, the previous set is kept on disk rather than
         .map(name => readKeySet(path.join(root, name)));
     assert.ok(survivors.some(set => JSON.stringify(set) === JSON.stringify(before)));
 });
+
+test("loads the committed LocalStorage key and serves later reads from memory", async () => {
+    const root = tempRoot();
+    const source = path.join(root, "source");
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(source);
+    const manager = new FindMyKeyManager({ keysDir, validate: () => undefined });
+    await manager.importFromDirectory(source);
+
+    assert.deepEqual(manager.loadLocalStorageKey(), localStorageKey);
+
+    fs.writeFileSync(path.join(keysDir, FIND_MY_KEY_FILES.LocalStorage), Buffer.alloc(32, 0x99));
+    assert.deepEqual(manager.loadLocalStorageKey(), localStorageKey);
+});
+
+test("a failed import keeps serving the cached keys; a successful one replaces them", async () => {
+    const root = tempRoot();
+    const source = path.join(root, "source");
+    const keysDir = path.join(root, "FindMyKeys");
+    seedExistingSet(keysDir);
+    const oldKey = fs.readFileSync(path.join(keysDir, FIND_MY_KEY_FILES.LocalStorage));
+    let rejectFmf = true;
+    const manager = new FindMyKeyManager({
+        keysDir,
+        validate: type => {
+            if (type === "FMF" && rejectFmf) throw new Error("rejected");
+        }
+    });
+    assert.deepEqual(manager.loadLocalStorageKey(), oldKey);
+    writeKeySet(source);
+
+    await manager.importFromDirectory(source);
+    assert.deepEqual(manager.loadLocalStorageKey(), oldKey);
+
+    rejectFmf = false;
+    await manager.importFromDirectory(source);
+    assert.deepEqual(manager.loadLocalStorageKey(), localStorageKey);
+});
+
+test("status reports missing when no keys have been imported", async () => {
+    const root = tempRoot();
+    const manager = new FindMyKeyManager({ keysDir: path.join(root, "FindMyKeys"), validate: () => undefined });
+
+    const status = await manager.getStatus();
+
+    assert.equal(status.state, "missing");
+    assert.deepEqual(status.keys, { LocalStorage: "missing", FMIP: "missing", FMF: "missing" });
+});
+
+test("status reports ready when all three imported keys pass validation", async () => {
+    const root = tempRoot();
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(keysDir);
+    const manager = new FindMyKeyManager({ keysDir, validate: () => undefined });
+
+    const status = await manager.getStatus();
+
+    assert.equal(status.state, "ready");
+    assert.deepEqual(status.keys, { LocalStorage: "ready", FMIP: "ready", FMF: "ready" });
+});
+
+test("status reports invalid keys without exposing their bytes, and missing beats invalid", async () => {
+    const root = tempRoot();
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(keysDir, { [FIND_MY_KEY_FILES.LocalStorage]: Buffer.alloc(31, 0xa1) });
+    const manager = new FindMyKeyManager({
+        keysDir,
+        validate: (type, data) => {
+            if (type === "FMIP") throw new Error(data.toString("hex"));
+        }
+    });
+
+    const status = await manager.getStatus();
+
+    assert.equal(status.state, "invalid");
+    assert.deepEqual(status.keys, { LocalStorage: "invalid", FMIP: "invalid", FMF: "ready" });
+    const serialized = JSON.stringify(status);
+    for (const secret of [...keyRepresentations(fmipKey), ...keyRepresentations(fmfKey)]) {
+        assert.equal(serialized.includes(secret), false);
+    }
+
+    fs.rmSync(path.join(keysDir, FIND_MY_KEY_FILES.FMF));
+    assert.equal((await manager.getStatus()).state, "missing");
+});
+
+test("validateKeyFile checks a candidate file without importing it", async () => {
+    const root = tempRoot();
+    const source = path.join(root, "source");
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(source, { [FIND_MY_KEY_FILES.FMF]: Buffer.from("junk") });
+    const manager = new FindMyKeyManager({ keysDir, validate: () => undefined });
+
+    assert.equal(await manager.validateKeyFile("FMIP", path.join(source, FIND_MY_KEY_FILES.FMIP)), true);
+    assert.equal(await manager.validateKeyFile("FMF", path.join(source, FIND_MY_KEY_FILES.FMF)), false);
+    assert.equal(await manager.validateKeyFile("FMF", path.join(root, "nope.bplist")), false);
+    assert.equal(fs.existsSync(keysDir), false);
+});
+
+test("a LocalStorage key file of the wrong length loads as null", () => {
+    const root = tempRoot();
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(keysDir, { [FIND_MY_KEY_FILES.LocalStorage]: Buffer.alloc(16, 0xa1) });
+    const manager = new FindMyKeyManager({ keysDir, validate: () => undefined });
+
+    assert.equal(manager.loadLocalStorageKey(), null);
+});
+
+test("cache keys are extracted from the imported bplist by the injected extractor and cached", async () => {
+    const root = tempRoot();
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(keysDir);
+    const extracted = Buffer.alloc(32, 0x5c);
+    const calls: string[] = [];
+    const manager = new FindMyKeyManager({
+        keysDir,
+        validate: () => undefined,
+        extractCacheKey: (type, data) => {
+            calls.push(type);
+            return data.equals(fmipKey) ? extracted : null;
+        }
+    });
+
+    assert.deepEqual(await manager.loadCacheKey("FMIP"), extracted);
+    assert.deepEqual(await manager.loadCacheKey("FMIP"), extracted);
+    assert.equal(await manager.loadCacheKey("FMF"), null);
+    assert.deepEqual(calls, ["FMIP", "FMF"]);
+});
+
+test("a throwing extractor loads as null", async () => {
+    const root = tempRoot();
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(keysDir);
+    const manager = new FindMyKeyManager({
+        keysDir,
+        validate: () => undefined,
+        extractCacheKey: () => {
+            throw new Error("unparseable");
+        }
+    });
+
+    assert.equal(await manager.loadCacheKey("FMF"), null);
+});
+
+test("an unreadable source entry fails the import cleanly instead of throwing", async () => {
+    const root = tempRoot();
+    const source = path.join(root, "source");
+    const keysDir = path.join(root, "FindMyKeys");
+    writeKeySet(source, { [FIND_MY_KEY_FILES.FMIP]: null });
+    fs.mkdirSync(path.join(source, FIND_MY_KEY_FILES.FMIP));
+    const before = seedExistingSet(keysDir);
+    const manager = new FindMyKeyManager({ keysDir, validate: () => undefined });
+
+    const result = await manager.importFromDirectory(source);
+
+    assert.equal(!result.success && result.file, FIND_MY_KEY_FILES.FMIP);
+    assert.equal(!result.success && result.reason, "invalid");
+    assert.deepEqual(readKeySet(keysDir), before);
+    assert.deepEqual(fs.readdirSync(root).sort(), ["FindMyKeys", "source"]);
+});
+
+test("an oversized key file is rejected without reaching the deep-validation hook", async () => {
+    const root = tempRoot();
+    const source = path.join(root, "source");
+    const keysDir = path.join(root, "FindMyKeys");
+    const huge = Buffer.concat([Buffer.from("bplist00"), Buffer.alloc(65 * 1024)]);
+    writeKeySet(source, { [FIND_MY_KEY_FILES.FMF]: huge });
+    let deepChecked = false;
+    const manager = new FindMyKeyManager({
+        keysDir,
+        validate: type => {
+            if (type === "FMF") deepChecked = true;
+        }
+    });
+
+    const result = await manager.importFromDirectory(source);
+
+    assert.equal(!result.success && result.reason, "invalid");
+    assert.equal(deepChecked, false);
+});
