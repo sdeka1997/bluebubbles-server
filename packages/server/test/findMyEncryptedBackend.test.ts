@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EncryptedFriendsBackend, refreshEncryptedFriends } from "../src/server/api/lib/findmy/FindMyEncryptedBackend";
+import {
+    EncryptedFriendsBackend,
+    refreshEncryptedFriends,
+    selectFindMyBackend
+} from "../src/server/api/lib/findmy/FindMyEncryptedBackend";
 import { FindMyFriendsCache } from "../src/server/api/lib/findmy/FindMyFriendsCache";
 import { FindMyLocationItem } from "../src/server/api/lib/findmy/types";
 
@@ -216,4 +220,22 @@ test("a transient decrypt or read failure keeps serving the last good cache", as
     }
     assert.equal(emitted.length, 0);
     assert.ok(logs.length >= 6, "foreground and background failures are both logged");
+});
+
+test("macOS 14.4+ selects the encrypted backend; older versions keep the existing path", () => {
+    const calls: string[] = [];
+    const backends = {
+        encrypted: () => {
+            calls.push("encrypted");
+            return "encrypted";
+        },
+        legacy: () => {
+            calls.push("legacy");
+            return "legacy";
+        }
+    };
+
+    assert.equal(selectFindMyBackend(true, backends), "encrypted");
+    assert.equal(selectFindMyBackend(false, backends), "legacy");
+    assert.deepEqual(calls, ["encrypted", "legacy"]);
 });

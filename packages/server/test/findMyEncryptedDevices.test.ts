@@ -4,14 +4,18 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readEncryptedDevices } from "../src/server/api/lib/findmy/FindMyEncryptedBackend";
+import {
+    EncryptedDevicesBackend,
+    getEncryptedDevices,
+    readEncryptedDevices
+} from "../src/server/api/lib/findmy/FindMyEncryptedBackend";
 import { CACHE_KEY, sealedCacheFile } from "./findMyCacheFixtures";
 
-const withFindMyDir = <T>(files: Record<string, Buffer>, fn: (dir: string) => T): T => {
+const withFindMyDir = async <T>(files: Record<string, Buffer>, fn: (dir: string) => T): Promise<Awaited<T>> => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "findmy-devices-test-"));
     try {
         for (const [name, data] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), data);
-        return fn(dir);
+        return await fn(dir);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -56,18 +60,18 @@ test("decrypts Devices, Items and ItemGroups and combines them like the plaintex
         }
     ));
 
-test("missing Items or ItemGroups still returns the devices; nothing at all returns null", () => {
-    withFindMyDir({ "Devices.data": sealedCacheFile([IPHONE]) }, dir => {
+test("missing Items or ItemGroups still returns the devices; nothing at all returns null", async () => {
+    await withFindMyDir({ "Devices.data": sealedCacheFile([IPHONE]) }, dir => {
         assert.deepEqual(readEncryptedDevices(CACHE_KEY, dir), [IPHONE]);
     });
-    withFindMyDir({ "Items.data": sealedCacheFile([AIRTAG]) }, dir => {
+    await withFindMyDir({ "Items.data": sealedCacheFile([AIRTAG]) }, dir => {
         const devices = readEncryptedDevices(CACHE_KEY, dir);
         assert.deepEqual(
             devices.map(device => [device.id, device.groupName]),
             [["item-1", undefined]]
         );
     });
-    withFindMyDir({}, dir => {
+    await withFindMyDir({}, dir => {
         assert.equal(readEncryptedDevices(CACHE_KEY, dir), null);
     });
 });
@@ -84,7 +88,7 @@ test("an Items payload that decrypts to null or a non-array is treated as no ite
         }
     ));
 
-test("one malformed or undecryptable file degrades to the others instead of failing the list", () => {
+test("one malformed or undecryptable file degrades to the others instead of failing the list", async () => {
     const wrongKey = sealedCacheFile([AIRTAG], Buffer.alloc(32, 0x33));
     const cases: Array<[string, Record<string, Buffer>, string[]]> = [
         [
@@ -108,7 +112,7 @@ test("one malformed or undecryptable file degrades to the others instead of fail
         ]
     ];
     for (const [name, files, expected] of cases) {
-        withFindMyDir(files, dir => {
+        await withFindMyDir(files, dir => {
             const errors: string[] = [];
             const devices = readEncryptedDevices(CACHE_KEY, dir, (file, error) => errors.push(`${file}: ${error}`));
 
@@ -137,3 +141,27 @@ test("null entries inside the decrypted Items or ItemGroups are skipped", () =>
             );
         }
     ));
+
+test("devices on 14.4+: a missing FMIP key returns null without bouncing Find My", async () => {
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const backend = (fmipKey: Buffer | null, dir: string): EncryptedDevicesBackend => ({
+        loadFmipKey: async () => fmipKey,
+        findMyDir: dir,
+        bounce: async () => {
+            calls.push("bounce");
+        },
+        log: message => logs.push(message)
+    });
+
+    await withFindMyDir({ "Devices.data": sealedCacheFile([IPHONE]) }, async dir => {
+        assert.equal(await getEncryptedDevices(backend(null, dir), true), null);
+        assert.deepEqual(calls, []);
+        assert.match(logs.join("\n"), /FMIP key/);
+
+        assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir)), [IPHONE]);
+        assert.deepEqual(calls, []);
+        assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir), true), [IPHONE]);
+        assert.deepEqual(calls, ["bounce"]);
+    });
+});

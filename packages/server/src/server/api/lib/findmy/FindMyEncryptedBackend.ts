@@ -9,6 +9,15 @@ import { FindMyFriendsCache } from "./FindMyFriendsCache";
 import { FindMyDevice, FindMyItem, FindMyLocationItem } from "./types";
 import { transformFindMyItemToDevice } from "./utils";
 
+/**
+ * macOS 14.4+ encrypts Find My's caches and the Private API helper no longer reports friends,
+ * so it gets the encrypted backend. Older versions keep the existing path untouched.
+ */
+export const selectFindMyBackend = <T>(
+    isMinSonoma14_4: boolean,
+    backends: { encrypted: () => T; legacy: () => T }
+): T => (isMinSonoma14_4 ? backends.encrypted() : backends.legacy());
+
 /** Everything the macOS 14.4+ friends refresh touches, injected so it can be tested without Electron. */
 export type EncryptedFriendsBackend = {
     loadLocalStorageKey: () => Buffer | null;
@@ -116,4 +125,33 @@ export const readEncryptedDevices = (
     }
 
     return [...(devices ?? []), ...(items ?? []).map(transformFindMyItemToDevice)];
+};
+
+export type EncryptedDevicesBackend = {
+    loadFmipKey: () => Promise<Buffer | null>;
+    /** Directory holding the FMIP caches (FileSystem.findMyDir in production) */
+    findMyDir: string;
+    /** Quits, relaunches and re-hides Find My so it fetches fresh locations */
+    bounce: () => Promise<void>;
+    log: (message: string) => void;
+};
+
+/**
+ * Devices for macOS 14.4+. Checks the FMIP key before `refresh` bounces Find My: without the
+ * key, the bounce cannot produce anything we can read.
+ */
+export const getEncryptedDevices = async (
+    backend: EncryptedDevicesBackend,
+    refresh = false
+): Promise<FindMyDevice[] | null> => {
+    const fmipKey = await backend.loadFmipKey();
+    if (!fmipKey) {
+        backend.log("Find My FMIP key is not imported; cannot read devices.");
+        return null;
+    }
+
+    if (refresh) await backend.bounce();
+    return readEncryptedDevices(fmipKey, backend.findMyDir, (file, error) =>
+        backend.log(`Failed to read Find My ${file}: ${error}`)
+    );
 };
