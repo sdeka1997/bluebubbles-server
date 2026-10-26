@@ -26,6 +26,7 @@ export type MessageResponse = {
     originalROWID: number;
     tempGuid?: string;
     guid: string;
+    service?: string;
     text: string;
     attributedBody?: NSAttributedString[];
     messageSummaryInfo?: NodeJS.Dict<any>[];
@@ -90,6 +91,7 @@ export type HandleResponse = {
 export type ChatResponse = {
     originalROWID: number;
     guid: string;
+    serviceName?: string;
     participants?: HandleResponse[];
     messages?: MessageResponse[];
     lastMessage?: MessageResponse;
