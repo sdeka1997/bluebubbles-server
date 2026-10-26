@@ -1,8 +1,13 @@
+import fs from "fs";
+import path from "path";
 import { startBackgroundFindMyRefresh } from "./BackgroundFindMyRefresh";
+import { decryptCacheBuffer } from "./decrypt/cache";
+import { readCacheFile } from "./decrypt/plistUtils";
 import { buildEncryptedFriendItems, EncryptedFriendLocation } from "./EncryptedFriendMapper";
 import { buildFindMyRoster } from "./FindMyFriendRoster";
 import { FindMyFriendsCache } from "./FindMyFriendsCache";
-import { FindMyLocationItem } from "./types";
+import { FindMyDevice, FindMyItem, FindMyLocationItem } from "./types";
+import { transformFindMyItemToDevice } from "./utils";
 
 /** Everything the macOS 14.4+ friends refresh touches, injected so it can be tested without Electron. */
 export type EncryptedFriendsBackend = {
@@ -71,4 +76,44 @@ export const refreshEncryptedFriends = async (
         backend.log(`Failed to read Find My friends from the encrypted cache: ${error}`);
     }
     return backend.cache.getAll();
+};
+
+/**
+ * Devices for macOS 14.4+: decrypts the FMIP caches (Devices, Items, ItemGroups) in `findMyDir`
+ * and combines them as the plaintext path does. A file that is missing, corrupt or sealed with
+ * another key counts as absent, so one bad file cannot hide the rest.
+ *
+ * @returns null if neither Devices nor Items could be read
+ */
+export const readEncryptedDevices = (
+    fmipKey: Buffer,
+    findMyDir: string,
+    onError: (file: string, error: unknown) => void = () => undefined
+): FindMyDevice[] | null => {
+    const read = (name: string): any[] | null => {
+        const file = `${name}.data`;
+        const filePath = path.join(findMyDir, file);
+        if (!fs.existsSync(filePath)) return null;
+        try {
+            const data = decryptCacheBuffer(readCacheFile(filePath), fmipKey);
+            // Apple's "$null" entries are normalized to null; skip them
+            return Array.isArray(data) ? data.filter(record => record && typeof record === "object") : [];
+        } catch (error) {
+            onError(file, error);
+            return null;
+        }
+    };
+
+    const devices: FindMyDevice[] | null = read("Devices");
+    const items: FindMyItem[] | null = read("Items");
+    if (devices == null && items == null) return null;
+
+    const groupNames = new Map<string, string>((read("ItemGroups") ?? []).map(group => [group.identifier, group.name]));
+    for (const item of items ?? []) {
+        if (item.groupIdentifier && groupNames.has(item.groupIdentifier)) {
+            item.groupName = groupNames.get(item.groupIdentifier);
+        }
+    }
+
+    return [...(devices ?? []), ...(items ?? []).map(transformFindMyItemToDevice)];
 };
