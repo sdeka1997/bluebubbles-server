@@ -2,7 +2,7 @@ import { Server } from "@server";
 import path from "path";
 import fs from "fs";
 import { FileSystem } from "@server/fileSystem";
-import { isMinBigSur, isMinSequoia, isMinSonoma } from "@server/env";
+import { isMinBigSur, isMinSonoma, isMinSonoma14_4 } from "@server/env";
 import { checkPrivateApiStatus, waitMs } from "@server/helpers/utils";
 import {
     quitFindMyFriends,
@@ -23,6 +23,15 @@ import {
 import { startBackgroundFindMyRefresh } from "@server/api/lib/findmy/BackgroundFindMyRefresh";
 import { PrivateApiFindMyEventHandler } from "@server/api/privateApi/eventHandlers/PrivateApiFindMyEventHandler";
 import { FindMyAddressLabeler, createAppleGeocodeBatch } from "@server/api/lib/findmy/AppleReverseGeocoder";
+import {
+    EncryptedDevicesBackend,
+    EncryptedFriendsBackend,
+    getEncryptedDevices,
+    refreshEncryptedFriends,
+    selectFindMyBackend
+} from "@server/api/lib/findmy/FindMyEncryptedBackend";
+import { readFmfRosterData } from "@server/api/lib/findmy/decrypt/fmfReader";
+import { readFriendLocations } from "@server/api/lib/findmy/decrypt/localStorageReader";
 
 export class FindMyInterface {
     // Shared so the coordinate-cell cache survives between refreshes. Created lazily because
@@ -59,12 +68,57 @@ export class FindMyInterface {
         return Server().findMyCache.getAll();
     }
 
-    static async getDevices(): Promise<Array<FindMyDevice> | null> {
-        if (isMinSequoia) {
-            Server().logger.debug('Cannot fetch FindMy devices on macOS Sequoia or later.');
-            return null;
-        }
+    /**
+     * macOS 14.4+ keeps friends and devices in encrypted caches, read with the user-imported keys.
+     * Never uses the Private API helper, which no longer reports Find My data there.
+     */
+    private static encryptedFriendsBackend(): EncryptedFriendsBackend {
+        const log = (message: string) => Server().logger.info(message);
+        return {
+            loadLocalStorageKey: () => Server().findMyKeys.loadLocalStorageKey(),
+            loadFmfKey: () => Server().findMyKeys.loadCacheKey("FMF"),
+            readRosterData: key => readFmfRosterData(key, FileSystem.findMyFmfCacheDir),
+            readLocations: key => readFriendLocations(key, FileSystem.findMyLocalStorageDbPath),
+            cache: Server().findMyCache,
+            label: async locations => {
+                // Wait briefly for cities so the response carries them; slower ones follow over the socket
+                const labeler = this.getLabeler();
+                if (!labeler) return locations;
+                const labeled = await labeler.labelWithin(locations, 3000);
+                if (labeled.late) {
+                    void labeled.late
+                        .then(late => new PrivateApiFindMyEventHandler().handleNewLocation(late))
+                        .catch(() => undefined);
+                }
+                return labeled.current;
+            },
+            bounce: () => this.refreshLocationsAccessibility(),
+            isFindMyRunning: () => this.isFindMyRunning(),
+            quitFindMy: async () => {
+                await FileSystem.executeAppleScript(quitFindMyFriends());
+            },
+            publish: locations => this.publishWithAddresses(locations),
+            log
+        };
+    }
 
+    private static encryptedDevicesBackend(): EncryptedDevicesBackend {
+        return {
+            loadFmipKey: () => Server().findMyKeys.loadCacheKey("FMIP"),
+            findMyDir: FileSystem.findMyDir,
+            bounce: () => this.refreshLocationsAccessibility(),
+            log: message => Server().logger.info(message)
+        };
+    }
+
+    static async getDevices(): Promise<Array<FindMyDevice> | null> {
+        return await selectFindMyBackend(isMinSonoma14_4, {
+            encrypted: () => getEncryptedDevices(this.encryptedDevicesBackend()),
+            legacy: () => this.readPlaintextDevices()
+        });
+    }
+
+    private static async readPlaintextDevices(): Promise<Array<FindMyDevice> | null> {
         try {
             const [devices, items] = await Promise.all([
                 FindMyInterface.readDataFile("Devices"),
@@ -111,12 +165,24 @@ export class FindMyInterface {
     }
 
     static async refreshDevices(): Promise<Array<FindMyDevice> | null> {
-        // Can't use the Private API to refresh devices yet
-        await this.refreshLocationsAccessibility();
-        return await this.getDevices();
+        return await selectFindMyBackend(isMinSonoma14_4, {
+            encrypted: () => getEncryptedDevices(this.encryptedDevicesBackend(), true),
+            legacy: async () => {
+                // Can't use the Private API to refresh devices yet
+                await this.refreshLocationsAccessibility();
+                return await this.readPlaintextDevices();
+            }
+        });
     }
 
     static async refreshFriends(openFindMyApp = true): Promise<FindMyLocationItem[]> {
+        return await selectFindMyBackend(isMinSonoma14_4, {
+            encrypted: () => refreshEncryptedFriends(this.encryptedFriendsBackend(), openFindMyApp),
+            legacy: () => this.refreshFriendsBefore14_4(openFindMyApp)
+        });
+    }
+
+    private static async refreshFriendsBefore14_4(openFindMyApp: boolean): Promise<FindMyLocationItem[]> {
         let refreshedFindMyApp = false;
         // Find My's roster is authoritative for identity, favorites, and removals.
         Server().findMyCache.refreshRoster(true);
