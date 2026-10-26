@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { chacha20poly1305 } from "@noble/ciphers/chacha";
 import plist from "plist";
 
 import {
@@ -18,16 +17,7 @@ import {
     parsePlistFile
 } from "../src/server/api/lib/findmy/decrypt/plistUtils";
 import { readFmfRosterData } from "../src/server/api/lib/findmy/decrypt/fmfReader";
-
-const KEY = Buffer.alloc(32, 0x11);
-const NONCE = Buffer.alloc(12, 0x22);
-
-/** Builds Apple's `[nonce][ciphertext][tag]` envelope with a fixed key and nonce. */
-const seal = (plaintext: Buffer, key: Buffer = KEY, nonce: Buffer = NONCE): Buffer =>
-    Buffer.concat([
-        nonce,
-        Buffer.from(chacha20poly1305(new Uint8Array(key), new Uint8Array(nonce)).encrypt(plaintext))
-    ]);
+import { CACHE_KEY as KEY, cacheFile, seal } from "./findMyCacheFixtures";
 
 // Synthetic FriendCacheData payload as a binary plist (generated with Python's plistlib):
 // { contacts: { "friend-1~": { displayName: "Dad", shortName: "$null" } },
@@ -38,9 +28,6 @@ const FMF_PAYLOAD = Buffer.from(
     "YnBsaXN0MDDTAQIDBAsWWGNvbnRhY3RzWWZvbGxvd2luZ1ZteUluZm/RBQZZZnJpZW5kLTF+0gcICQpbZGlzcGxheU5hbWVZc2hvcnROYW1lU0RhZFUkbnVsbKEM0w0ODxARE1JpZF8QGWludml0YXRpb25BY2NlcHRlZEhhbmRsZXNWbmVzdGVkWGZyaWVuZC0xoRJfEA9kYWRAZXhhbXBsZS5jb22iChTRFQpUZGVlcNEXGFZlbWFpbHOhGV8QEW93bmVyQGV4YW1wbGUuY29tCA8YIiksNjtHUVVbXWRng4qTlaeqrbK1vL4AAAAAAAABAQAAAAAAAAAaAAAAAAAAAAAAAAAAAAAA0g==",
     "base64"
 );
-
-/** Wraps an envelope the way Apple's `.data` cache files do: a plist with `encryptedData`. */
-const cacheFile = (envelope: Buffer): Buffer => Buffer.from(plist.build({ encryptedData: envelope } as any));
 
 test("decrypts a ChaCha20-Poly1305 envelope", () => {
     const envelope = seal(Buffer.from("find my friends"));
