@@ -1,6 +1,7 @@
 import * as KoaRouter from "koa-router";
 import { Server } from "@server";
 import { isNotEmpty } from "@server/helpers/utils";
+import { isMinSonoma14_4 } from "@server/env";
 
 // Middleware
 import { AuthMiddleware } from "./middleware/authMiddleware";
@@ -24,6 +25,7 @@ import { MacOsRouter } from "./routers/macosRouter";
 import { iCloudRouter } from "./routers/icloudRouter";
 import { FaceTimeRouter } from "./routers/facetimeRouter";
 import { PrivateApiMiddleware } from "./middleware/privateApiMiddleware";
+import { findMyFriendsMiddleware } from "./middleware/findMyFriendsGate";
 import { HttpDefinition, HttpMethod, HttpRoute, HttpRouteGroup, KoaMiddleware } from "../../types";
 import { SettingsValidator } from "./validators/settingsValidator";
 import { MessageValidator } from "./validators/messageValidator";
@@ -125,7 +127,11 @@ export class HttpRoutes {
                     {
                         method: HttpMethod.GET,
                         path: "findmy/friends",
-                        middleware: [...HttpRoutes.protected, PrivateApiMiddleware],
+                        middleware: findMyFriendsMiddleware(
+                            isMinSonoma14_4,
+                            HttpRoutes.protected,
+                            PrivateApiMiddleware
+                        ),
                         controller: FindMyRouter.friends
                     },
                     {
