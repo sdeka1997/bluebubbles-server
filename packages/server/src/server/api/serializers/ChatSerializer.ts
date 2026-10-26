@@ -56,6 +56,9 @@ export class ChatSerializer {
             guid: chat.guid,
             style: chat.style,
             chatIdentifier: chat.chatIdentifier,
+            // On macOS 26 every chat GUID starts with `any;`, so the GUID no
+            // longer says whether a chat is iMessage, SMS or RCS. This does.
+            serviceName: chat.serviceName,
             isArchived: chat.isArchived,
             displayName: chat.displayName
         };

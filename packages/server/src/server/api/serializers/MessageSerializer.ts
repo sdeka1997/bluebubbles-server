@@ -129,6 +129,9 @@ export class MessageSerializer {
         let output: MessageResponse = {
             originalROWID: message.ROWID,
             guid: message.guid,
+            // iMessage, SMS or RCS. A chat can mix them: an RCS message that
+            // falls back to SMS is stored as SMS.
+            service: message.service,
             text: message.universalText(true),
             attributedBody: message.attributedBody,
             handle: message.handle
