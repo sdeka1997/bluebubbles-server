@@ -9,4 +9,8 @@ release/
 .swiftpm
 .yarn
 .yarnrc*
-.npmrc
+.npmrcnode_modules/
+packages/*/node_modules/
+packages/server/dist/
+packages/ui/build/
+*.log

@@ -14,6 +14,10 @@ import { isMinVentura } from "@server/env";
 import { supportsRecoverableMessages } from "@server/databases/imessage/snapshot/RecoverableMessageSnapshot";
 import { autoUpdater } from "electron-updater";
 import { SERVER_UPDATE_DOWNLOADING } from "@server/events";
+import {
+    OFFICIAL_UPDATES_ENABLED,
+    officialUpdateDisabledMessage
+} from "@server/services/updateService/customBuildPolicy";
 
 export class ServerRouter {
     static async getInfo(ctx: RouterContext, _: Next) {
@@ -63,6 +67,14 @@ export class ServerRouter {
     }
 
     static async installUpdate(ctx: RouterContext, _: Next) {
+        // Never let an API client bypass the custom build's disabled update checker.
+        if (!OFFICIAL_UPDATES_ENABLED) {
+            throw new BadRequest({
+                message: officialUpdateDisabledMessage(),
+                error: "CUSTOM_BUILD_UPDATE_DISABLED"
+            });
+        }
+
         const waitParam = (ctx.request.query?.wait ?? "false") as string;
         const wait = isTruthyBool(waitParam);
 
