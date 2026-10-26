@@ -6,11 +6,12 @@ import test from "node:test";
 
 import {
     cleanupStaleFindMyTemp,
+    readFriendLocations,
     readStableEncryptedSnapshot,
     SnapshotIo,
     withDecryptedDb
 } from "../src/server/api/lib/findmy/decrypt/localStorageReader";
-import { encryptDb, KEY, plainPage } from "./findMyLocalStorageFixtures";
+import { buildEncryptedSqliteDb, encryptDb, KEY, openNodeSqlite, plainPage } from "./findMyLocalStorageFixtures";
 
 const withTempDir = <T>(fn: (dir: string) => T): T => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "findmy-reader-test-"));
@@ -217,4 +218,137 @@ test("cleanupStaleFindMyTemp removes only bb-findmy- leftovers", () =>
         cleanupStaleFindMyTemp(tmpRoot);
 
         assert.deepEqual(fs.readdirSync(tmpRoot).sort(), ["bb-findmy-file", "bb-findmyX", "other-app"]);
+    }));
+
+// Binary plist (Python plistlib) of a secureLocations value:
+// { latitude: 33.123456, longitude: -96.654321, horizontalAccuracy: 5, locationLabel: "$null",
+//   timestamp: 2026-01-02T03:04:05Z }
+const LOCATION_PLIST = Buffer.from(
+    "YnBsaXN0MDDVAQIDBAUGBwgJCl8QEmhvcml6b250YWxBY2N1cmFjeVhsYXRpdHVkZV1sb2NhdGlvbkxhYmVsWWxvbmdpdHVkZVl0aW1lc3RhbXAjQBQAAAAAAAAjQECPzWf9P1tVJG51bGwjwFgp4GUwBYEzQceDtpKAAAAIEygxP0lTXGVrdAAAAAAAAAEBAAAAAAAAAAsAAAAAAAAAAAAAAAAAAAB9",
+    "base64"
+);
+
+const writeLocationsDb = (dir: string, setup: Parameters<typeof buildEncryptedSqliteDb>[0]): string => {
+    const dbPath = path.join(dir, "LocalStorage.db");
+    fs.writeFileSync(dbPath, buildEncryptedSqliteDb(setup).db);
+    return dbPath;
+};
+
+test("reads friend locations from a real encrypted LocalStorage.db", () =>
+    withTempDir(dir => {
+        const dbPath = writeLocationsDb(dir, db => {
+            db.exec("CREATE TABLE secureLocations (serverUserID TEXT, value BLOB)");
+            db.prepare("INSERT INTO secureLocations VALUES (?, ?)").run("friend-1~~", LOCATION_PLIST);
+        });
+
+        const locations = readFriendLocations(KEY, dbPath, { openDb: openNodeSqlite, tmpRoot: dir });
+
+        assert.equal(locations.length, 1);
+        assert.equal(locations[0].findMyId, "friend-1");
+        assert.equal(locations[0].location.latitude, 33.123456);
+        assert.equal(locations[0].location.longitude, -96.654321);
+        assert.equal(locations[0].location.locationLabel, null);
+        assert.equal((locations[0].location.timestamp as Date).getTime(), Date.UTC(2026, 0, 2, 3, 4, 5));
+    }));
+
+test("reads friend locations committed only to a real SQLite WAL", () =>
+    withTempDir(dir => {
+        const { db, wal } = buildEncryptedSqliteDb(
+            setup => setup.exec("CREATE TABLE secureLocations (serverUserID TEXT, value BLOB)"),
+            KEY,
+            live => live.prepare("INSERT INTO secureLocations VALUES (?, ?)").run("friend-wal", LOCATION_PLIST)
+        );
+        const dbPath = path.join(dir, "LocalStorage.db");
+        fs.writeFileSync(dbPath, db);
+        fs.writeFileSync(`${dbPath}-wal`, wal);
+
+        const locations = readFriendLocations(KEY, dbPath, { openDb: openNodeSqlite, tmpRoot: dir });
+
+        assert.deepEqual(
+            locations.map(l => l.findMyId),
+            ["friend-wal"]
+        );
+    }));
+
+test("skips rows with a missing id, a missing value or a malformed plist", () =>
+    withTempDir(dir => {
+        const dbPath = writeLocationsDb(dir, db => {
+            db.exec("CREATE TABLE secureLocations (serverUserID TEXT, value BLOB)");
+            const insert = db.prepare("INSERT INTO secureLocations VALUES (?, ?)");
+            insert.run("good", LOCATION_PLIST);
+            insert.run("truncated", LOCATION_PLIST.subarray(0, 40));
+            insert.run("garbage", Buffer.from("not a plist"));
+            insert.run("no-value", null);
+            insert.run(null, LOCATION_PLIST);
+            insert.run("~~", LOCATION_PLIST);
+            insert.run("text-value", "bplist00");
+        });
+
+        const locations = readFriendLocations(KEY, dbPath, { openDb: openNodeSqlite, tmpRoot: dir });
+
+        assert.deepEqual(
+            locations.map(l => l.findMyId),
+            ["good"]
+        );
+    }));
+
+test("handles schema variants: a serverID key column, or no secureLocations table at all", () =>
+    withTempDir(dir => {
+        const variant = writeLocationsDb(dir, db => {
+            db.exec("CREATE TABLE secureLocations (serverID TEXT, value BLOB, extra INTEGER)");
+            db.prepare("INSERT INTO secureLocations (serverID, value) VALUES (?, ?)").run("friend-2~", LOCATION_PLIST);
+        });
+        assert.deepEqual(
+            readFriendLocations(KEY, variant, { openDb: openNodeSqlite, tmpRoot: dir }).map(l => l.findMyId),
+            ["friend-2"]
+        );
+
+        const missing = writeLocationsDb(dir, db => db.exec("CREATE TABLE friends (handleIdentifier TEXT)"));
+        assert.deepEqual(readFriendLocations(KEY, missing, { openDb: openNodeSqlite, tmpRoot: dir }), []);
+
+        const noValue = writeLocationsDb(dir, db => db.exec("CREATE TABLE secureLocations (serverUserID TEXT)"));
+        assert.deepEqual(readFriendLocations(KEY, noValue, { openDb: openNodeSqlite, tmpRoot: dir }), []);
+    }));
+
+test("drops locations without finite in-range coordinates, including Apple's (0, 0) no-fix", () =>
+    withTempDir(dir => {
+        const plistOf = (b64: string) => Buffer.from(b64, "base64");
+        const dbPath = writeLocationsDb(dir, db => {
+            db.exec("CREATE TABLE secureLocations (serverUserID TEXT, value BLOB)");
+            const insert = db.prepare("INSERT INTO secureLocations VALUES (?, ?)");
+            insert.run("good", LOCATION_PLIST);
+            // latitude 0, longitude 32.5: on the equator, a real location
+            insert.run(
+                "equator",
+                plistOf(
+                    "YnBsaXN0MDDSAQIDBFhsYXRpdHVkZVlsb25naXR1ZGUjAAAAAAAAAAAjQEBAAAAAAAAIDRYgKQAAAAAAAAEBAAAAAAAAAAUAAAAAAAAAAAAAAAAAAAAy"
+                )
+            );
+            // latitude 0, longitude 0
+            insert.run(
+                "zero",
+                plistOf(
+                    "YnBsaXN0MDDVAQIDBAUGBwgHCV8QEmhvcml6b250YWxBY2N1cmFjeVhsYXRpdHVkZV1sb2NhdGlvbkxhYmVsWWxvbmdpdHVkZVl0aW1lc3RhbXAjQBQAAAAAAAAjAAAAAAAAAABVJG51bGwzQceDtpKAAAAIEygxP0lTXGVrAAAAAAAAAQEAAAAAAAAACgAAAAAAAAAAAAAAAAAAAHQ="
+                )
+            );
+            // latitude 123 (out of range)
+            insert.run(
+                "out-of-range",
+                plistOf(
+                    "YnBsaXN0MDDVAQIDBAUGBwgJCl8QEmhvcml6b250YWxBY2N1cmFjeVhsYXRpdHVkZV1sb2NhdGlvbkxhYmVsWWxvbmdpdHVkZVl0aW1lc3RhbXAjQBQAAAAAAAAjQF7AAAAAAABVJG51bGwjQCQAAAAAAAAzQceDtpKAAAAIEygxP0lTXGVrdAAAAAAAAAEBAAAAAAAAAAsAAAAAAAAAAAAAAAAAAAB9"
+                )
+            );
+            // longitude only
+            insert.run(
+                "no-latitude",
+                plistOf("YnBsaXN0MDDRAQJZbG9uZ2l0dWRlIz/wAAAAAAAACAsVAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAB4=")
+            );
+        });
+
+        const locations = readFriendLocations(KEY, dbPath, { openDb: openNodeSqlite, tmpRoot: dir });
+
+        assert.deepEqual(
+            locations.map(l => l.findMyId),
+            ["good", "equator"]
+        );
     }));

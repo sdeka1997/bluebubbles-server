@@ -1,7 +1,9 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { normalizePlistNulls } from "./cache";
 import { decryptLocalStorageSnapshot, EncryptedLocalStorageSnapshot } from "./localStorage";
+import { parsePlistBuffer } from "./plistUtils";
 
 export type FileFingerprint = { size: number; mtimeMs: number; ino: number; isFile: boolean };
 
@@ -132,3 +134,72 @@ export const cleanupStaleFindMyTemp = (tmpRoot: string = os.tmpdir()): void => {
         fs.rmSync(path.join(tmpRoot, entry.name), { recursive: true, force: true });
     }
 };
+
+export type RawFriendLocation = {
+    /** Apple's opaque Find My friend id (serverUserID), trailing `~` padding stripped. */
+    findMyId: string;
+    /** Parsed `secureLocations.value` plist (latitude/longitude/timestamp/...), "$null" -> null. */
+    location: Record<string, any>;
+};
+
+// better-sqlite3 returns BLOBs as Buffer, node:sqlite as Uint8Array
+const isBlob = (value: unknown): value is Uint8Array => value instanceof Uint8Array && value.length > 0;
+
+/**
+ * Finite, in-range coordinates. `typeof NaN` is "number", so check `Number.isFinite`; and
+ * (0, 0) is Apple's "no fix" placeholder, which would otherwise overwrite a known position.
+ */
+const hasUsableCoordinates = (location: any): boolean => {
+    const { latitude, longitude } = location ?? {};
+    return (
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180 &&
+        (latitude !== 0 || longitude !== 0)
+    );
+};
+
+const stripPadding = (id: string): string => id.replace(/~+$/, "");
+
+/**
+ * Reads friend coordinates from the encrypted LocalStorage.db. `secureLocations` holds one
+ * coordinate plist per friend, keyed by Apple's opaque id.
+ */
+export const readFriendLocations = (
+    key: Buffer,
+    dbPath: string,
+    options: DecryptedDbOptions = {}
+): RawFriendLocation[] =>
+    withDecryptedDb(
+        key,
+        dbPath,
+        db => {
+            const columns = new Set(
+                db
+                    .prepare("PRAGMA table_info(secureLocations)")
+                    .all()
+                    .map(column => column.name)
+            );
+            // Column names vary across macOS releases; anything unrecognised means no locations
+            const idColumn = ["serverUserID", "serverID"].find(name => columns.has(name));
+            if (!idColumn || !columns.has("value")) return [];
+
+            const rows = db.prepare(`SELECT ${idColumn} AS id, value FROM secureLocations`).all();
+            const out: RawFriendLocation[] = [];
+            for (const row of rows) {
+                const findMyId = typeof row.id === "string" ? stripPadding(row.id) : "";
+                if (!findMyId || !isBlob(row.value)) continue;
+                try {
+                    const location = normalizePlistNulls(parsePlistBuffer(Buffer.from(row.value)));
+                    if (hasUsableCoordinates(location)) {
+                        out.push({ findMyId, location });
+                    }
+                } catch {
+                    // One unreadable row must not cost every other friend's location
+                }
+            }
+            return out;
+        },
+        options
+    );

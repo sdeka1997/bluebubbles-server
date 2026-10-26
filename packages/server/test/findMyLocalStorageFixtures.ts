@@ -1,4 +1,8 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 /** Test-only builders for encrypted LocalStorage.db images and SQLite WAL files. */
 
@@ -96,3 +100,88 @@ export const buildWal = (
     }
     return Buffer.concat(parts);
 };
+
+/**
+ * Encrypts each page image of a plaintext WAL written by SQLite, as Apple's codec does before
+ * the frame is written, and recomputes the chained frame checksums over the encrypted bytes.
+ */
+const encryptWal = (plainWal: Buffer, key: Buffer): Buffer => {
+    const wal = Buffer.from(plainWal);
+    const bigEndian = wal.readUInt32BE(0) === WAL_MAGIC_BE;
+    let sum: [number, number] = [wal.readUInt32BE(24), wal.readUInt32BE(28)];
+    for (let offset = 32, n = 0; offset + 24 + PAGE_SIZE <= wal.length; offset += 24 + PAGE_SIZE, n++) {
+        const pgno = wal.readUInt32BE(offset);
+        const page = Buffer.from(wal.subarray(offset + 24, offset + 24 + PAGE_SIZE));
+        crypto
+            .createHash("sha256")
+            .update(`wal-nonce-${n}`)
+            .digest()
+            .copy(page, PAGE_SIZE - 12, 0, 12);
+        encryptPage(page, pgno, key).copy(wal, offset + 24);
+        sum = walChecksum(wal.subarray(offset, offset + 8), bigEndian, sum);
+        sum = walChecksum(wal.subarray(offset + 24, offset + 24 + PAGE_SIZE), bigEndian, sum);
+        wal.writeUInt32BE(sum[0], offset + 16);
+        wal.writeUInt32BE(sum[1], offset + 20);
+    }
+    return wal;
+};
+
+/**
+ * Builds a real SQLite database with `setup`, laid out the way Apple's codec needs it
+ * (4096-byte pages, 12 reserved bytes per page), stamps a per-page nonce into the reserved
+ * tail and encrypts it. Uses Node's built-in node:sqlite, so no native module is needed.
+ */
+export const buildEncryptedSqliteDb = (
+    setup: (db: DatabaseSync) => void,
+    key: Buffer = KEY,
+    walSetup?: (db: DatabaseSync) => void
+): { db: Buffer; wal: Buffer | null } => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "findmy-fixture-"));
+    try {
+        const file = path.join(dir, "fixture.db");
+        // Pre-write page 1's header so SQLite adopts reserved-bytes = 12 for every page
+        const header = Buffer.alloc(PAGE_SIZE);
+        header.write("SQLite format 3\0", 0, "binary");
+        header.writeUInt16BE(PAGE_SIZE, 16);
+        header.set([1, 1, 12, 64, 32, 32], 18);
+        header.writeUInt32BE(1, 24);
+        header.writeUInt32BE(1, 28);
+        header.writeUInt32BE(4, 44);
+        header.writeUInt32BE(1, 56);
+        header.writeUInt32BE(1, 92);
+        header.writeUInt32BE(3045000, 96);
+        header[100] = 0x0d;
+        header.writeUInt16BE(PAGE_SIZE - 12, 105);
+        fs.writeFileSync(file, header);
+
+        const db = new DatabaseSync(file);
+        setup(db);
+        let wal: Buffer | null = null;
+        if (walSetup) {
+            db.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0");
+            db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+            walSetup(db);
+            // Copy while the connection is open: closing the last connection checkpoints the WAL away
+            wal = encryptWal(fs.readFileSync(`${file}-wal`), key);
+        }
+        const plain = fs.readFileSync(file);
+        db.close();
+
+        const pages: Buffer[] = [];
+        for (let i = 0; i < plain.length / PAGE_SIZE; i++) {
+            const page = Buffer.from(plain.subarray(i * PAGE_SIZE, (i + 1) * PAGE_SIZE));
+            crypto
+                .createHash("sha256")
+                .update(`db-nonce-${i}`)
+                .digest()
+                .copy(page, PAGE_SIZE - 12, 0, 12);
+            pages.push(page);
+        }
+        return { db: encryptDb(pages, key), wal };
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+};
+
+/** Read-only node:sqlite opener matching the reader's injectable `openDb`. */
+export const openNodeSqlite = (filePath: string) => new DatabaseSync(filePath, { readOnly: true });
