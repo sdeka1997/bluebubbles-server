@@ -1,0 +1,10 @@
+Source: https://github.com/sdeka1997/bluebubbles-helper/commit/b385b560700324b9a2687cd12bcb7775f5dfeb95
+Upstream base: https://github.com/BlueBubblesApp/bluebubbles-helper/commit/a8961912da1a2cedfe5e4eb6fc5be6ca0569a684
+Architecture: x86_64
+SHA-256: 1d8db25dbbe96967b85709e8fff072b5ce9dea04b733785cfc8a93bcc8de2693
+
+Build command (from Messages/MacOS-11+):
+xcodebuild -workspace BlueBubblesHelper.xcworkspace -scheme "BlueBubblesHelper DyLib" -configuration Release -derivedDataPath /tmp/bluebubbles-helper-build ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO ENABLE_USER_SCRIPT_SANDBOXING=NO build
+
+Output:
+/tmp/bluebubbles-helper-build/Build/Products/Release/BlueBubblesHelper.dylib
