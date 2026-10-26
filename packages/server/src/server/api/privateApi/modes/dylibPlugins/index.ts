@@ -1,11 +1,11 @@
 import fs from "fs";
-import path from "path";
 import { waitMs } from "@server/helpers/utils";
 import { Server } from "@server";
 import { FileSystem } from "@server/fileSystem";
 import { hideApp } from "@server/api/apple/scripts";
 import { Loggable } from "@server/lib/logging/Loggable";
 import { ProcessSpawner } from "@server/lib/ProcessSpawner";
+import { defaultInjectedLibraries, injectedLibrariesEnvironmentValue } from "./injectedLibraries";
 
 export abstract class DylibPlugin extends Loggable {
     tag = "DylibPlugin";
@@ -27,6 +27,10 @@ export abstract class DylibPlugin extends Loggable {
     abstract get isEnabled(): boolean;
 
     abstract get dylibPath(): string;
+
+    get injectedLibraries(): string[] {
+        return defaultInjectedLibraries(this.dylibPath);
+    }
 
     constructor(name: string) {
         super();
@@ -124,10 +128,7 @@ export abstract class DylibPlugin extends Loggable {
                         options: {
                             env: {
                                 ...process.env,
-                                DYLD_INSERT_LIBRARIES: `${path.join(
-                                    path.dirname(this.dylibPath),
-                                    "ChatKitLoader.dylib"
-                                )}:${this.dylibPath}`
+                                DYLD_INSERT_LIBRARIES: injectedLibrariesEnvironmentValue(this.injectedLibraries)
                             }
                         }
                     });

@@ -23,22 +23,10 @@ import type {
 import { Chat } from "@server/databases/imessage/entity/Chat";
 import path from "path";
 import { DBWhereItem } from "@server/databases/imessage/types";
+import { isValidReaction, STANDARD_REACTIONS } from "@server/api/reactions";
 
 export class MessageInterface {
-    static possibleReactions: string[] = [
-        "love",
-        "like",
-        "dislike",
-        "laugh",
-        "emphasize",
-        "question",
-        "-love",
-        "-like",
-        "-dislike",
-        "-laugh",
-        "-emphasize",
-        "-question"
-    ];
+    static possibleReactions: string[] = [...STANDARD_REACTIONS];
 
     /**
      * Sends a message by executing the sendMessage AppleScript
@@ -430,15 +418,18 @@ export class MessageInterface {
         partIndex = 0
     }: SendReactionParams): Promise<Message> {
         checkPrivateApiStatus();
+        if (!isValidReaction(reaction, isMinSequoia)) {
+            throw new Error("Invalid reaction descriptor provided!");
+        }
 
         // Rebuild the selected message text to make it what the reaction text
         // would be in the database
-        let prefix = (reaction as string).startsWith("-")
-            ? negativeReactionTextMap[reaction as string]
-            : reactionTextMap[reaction as string];
+        let prefix = reaction.startsWith("-")
+            ? negativeReactionTextMap[reaction]
+            : reactionTextMap[reaction];
         if (!prefix) {
-            const isRemoval = (reaction as string).startsWith("-");
-            const emoji = isRemoval ? (reaction as string).substring(1) : (reaction as string);
+            const isRemoval = reaction.startsWith("-");
+            const emoji = isRemoval ? reaction.substring(1) : reaction;
             prefix = isRemoval ? `Removed ${emoji} from` : `Reacted ${emoji} to`;
         }
 

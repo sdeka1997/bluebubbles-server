@@ -10,5 +10,3 @@ release/
 .yarn
 .yarnrc*
 .npmrc
-*.pid
-

@@ -8,14 +8,14 @@ import { Handle } from "@server/databases/imessage/entity/Handle";
 import { Chat } from "@server/databases/imessage/entity/Chat";
 import { Attachment } from "@server/databases/imessage/entity/Attachment";
 import { isEmpty, isNotEmpty, sanitizeStr } from "@server/helpers/utils";
-import { 
+import {
     isMinBigSur,
     isMinCatalina,
     isMinHighSierra,
     isMinMonterey,
+    isMinSequoia,
     isMinSierra,
-    isMinVentura,
-    isMinSequoia
+    isMinVentura
 } from "@server/env";
 import { NSAttributedString } from "node-typedstream";
 import { AttributedBodyTransformer } from "@server/databases/transformers/AttributedBodyTransformer";

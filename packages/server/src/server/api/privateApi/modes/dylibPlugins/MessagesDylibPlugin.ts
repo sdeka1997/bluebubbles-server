@@ -5,6 +5,7 @@ import { Server } from "@server";
 import { isNotEmpty } from "@server/helpers/utils";
 import { FindMyInterface } from "@server/api/interfaces/findMyInterface";
 import path from "path";
+import { messagesInjectedLibraries } from "./injectedLibraries";
 
 const macVer = isMinMonterey ? "macos11" : isMinBigSur ? "macos11" : "macos10";
 
@@ -17,6 +18,10 @@ export class MessagesDylibPlugin extends DylibPlugin {
 
     get dylibPath() {
         return path.join(FileSystem.resources, "private-api", macVer, "BlueBubblesHelper.dylib");
+    }
+
+    get injectedLibraries(): string[] {
+        return messagesInjectedLibraries(this.dylibPath);
     }
 
     get isEnabled() {

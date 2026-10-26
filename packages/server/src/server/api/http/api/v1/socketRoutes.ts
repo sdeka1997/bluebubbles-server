@@ -14,6 +14,8 @@ import macosVersion from "macos-version";
 import { Server } from "@server";
 import { FileSystem } from "@server/fileSystem";
 import { isEmpty, isNotEmpty, onlyAlphaNumeric, safeTrim } from "@server/helpers/utils";
+import { isMinSequoia } from "@server/env";
+import { isValidReaction } from "@server/api/reactions";
 
 // Helpers
 import { ChatResponse, HandleResponse, ServerMetadataResponse } from "@server/types";
@@ -873,11 +875,7 @@ export class SocketRoutes {
                 return response(cb, "error", createBadRequestResponse("No message provided!"));
             if (!params?.actionMessageGuid || !params?.actionMessageText)
                 return response(cb, "error", createBadRequestResponse("No action message provided!"));
-            if (
-                !params?.tapback ||
-                typeof params.tapback !== "string" ||
-                params.tapback.trim().length === 0
-            )
+            if (!isValidReaction(params?.tapback, isMinSequoia))
                 return response(cb, "error", createBadRequestResponse("Invalid tapback descriptor provided!"));
 
             // Fetch the message we are reacting to
