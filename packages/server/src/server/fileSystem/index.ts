@@ -15,6 +15,7 @@ import {
     safeTrim
 } from "@server/helpers/utils";
 import { isMinMonterey } from "@server/env";
+import { localStorageDbCandidates, resolveLocalStorageDbPath } from "@server/api/lib/findmy/localStoragePath";
 import { Attachment } from "@server/databases/imessage/entity/Attachment";
 
 import { startMessages } from "../api/apple/scripts";
@@ -132,17 +133,11 @@ export class FileSystem {
     // FMF cache (friend roster and contacts, ChaCha20-Poly1305 encrypted on macOS 14.4+)
     public static findMyFmfCacheDir = path.join(userHomeDir(), "Library", "Caches", "com.apple.findmy.fmfcore");
 
-    // Encrypted SQLite database that holds friend coordinates on macOS 14.4+
-    public static findMyLocalStorageDir = path.join(
-        userHomeDir(),
-        "Library",
-        "Group Containers",
-        "group.com.apple.findmy.findmylocateagent",
-        "Library",
-        "Application Support"
-    );
-
-    public static findMyLocalStorageDbPath = path.join(FileSystem.findMyLocalStorageDir, "LocalStorage.db");
+    // Encrypted SQLite database that holds friend coordinates on macOS 14.4+.
+    // Its folder differs by macOS version, so it is looked up when needed.
+    public static get findMyLocalStorageDbPath(): string {
+        return resolveLocalStorageDbPath(localStorageDbCandidates(userHomeDir(), FileSystem.getUserConfDirSync()));
+    }
 
     // Where BlueBubbles keeps the user-imported Find My decryption keys. Not created by
     // setupDirectories(): the key manager creates it with restrictive permissions on import.
@@ -166,6 +161,14 @@ export class FileSystem {
 
     public static async getUserConfDir(): Promise<string> {
         return (await FileSystem.execShellCommand(`/usr/bin/getconf DARWIN_USER_DIR`)).trim();
+    }
+
+    public static getUserConfDirSync(): string | null {
+        try {
+            return child_process.execFileSync("/usr/bin/getconf", ["DARWIN_USER_DIR"], { encoding: "utf8" }).trim() || null;
+        } catch {
+            return null;
+        }
     }
 
     /**
