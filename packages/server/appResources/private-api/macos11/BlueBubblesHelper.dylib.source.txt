@@ -1,10 +1,25 @@
-Source: https://github.com/sdeka1997/bluebubbles-helper/commit/b385b560700324b9a2687cd12bcb7775f5dfeb95
-Upstream base: https://github.com/BlueBubblesApp/bluebubbles-helper/commit/a8961912da1a2cedfe5e4eb6fc5be6ca0569a684
-Architecture: x86_64
-SHA-256: 1d8db25dbbe96967b85709e8fff072b5ce9dea04b733785cfc8a93bcc8de2693
+Source: https://github.com/sdeka1997/bluebubbles-helper/commit/7fdedfb166df373f83710a1a1a62a518676f7fc5
+Upstream base: https://github.com/BlueBubblesApp/bluebubbles-helper/commit/df40280e0ae30c42cd45d0bab838dcc2d64c4c7a
+Architectures: x86_64, arm64, arm64e
+SHA-256: 39c7dbd66e70c97e9d087ed2e887436832188e9a7f50b06dad9de474d6ff2105
 
-Build command (from Messages/MacOS-11+):
-xcodebuild -workspace BlueBubblesHelper.xcworkspace -scheme "BlueBubblesHelper DyLib" -configuration Release -derivedDataPath /tmp/bluebubbles-helper-build ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO ENABLE_USER_SCRIPT_SANDBOXING=NO build
+Dependency preparation:
+Run `pod install` in Messages/MacOS-11+ using the committed Podfile.lock. This
+build reused CocoaPods support files generated from an identical Podfile and
+Podfile.lock (CocoaAsyncSocket 7.6.5) because CocoaPods was not installed on the
+build host.
+
+Build command (from the helper repository root):
+xcodebuild -workspace "Messages/MacOS-11+/BlueBubblesHelper.xcworkspace" \
+  -scheme "BlueBubblesHelper DyLib" -configuration Release \
+  -derivedDataPath /tmp/wemoji-helper-minimal-universal-build \
+  ARCHS="x86_64 arm64 arm64e" ONLY_ACTIVE_ARCH=NO \
+  CODE_SIGNING_ALLOWED=NO ENABLE_USER_SCRIPT_SANDBOXING=NO build
 
 Output:
-/tmp/bluebubbles-helper-build/Build/Products/Release/BlueBubblesHelper.dylib
+/tmp/wemoji-helper-minimal-universal-build/Build/Products/Release/BlueBubblesHelper.dylib
+
+Static acceptance gates, passed for every architecture:
+- no `_OBJC_CLASS_$_CK*` undefined imports (`nm -arch <arch> -u`)
+- no `_OBJC_CLASS_$_CK*` fixups (`dyld_info -arch <arch> -fixups`)
+- `associatedMessageEmoji` selector embedded

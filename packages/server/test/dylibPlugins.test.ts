@@ -11,7 +11,7 @@ test("dylib plugins inject only their helper by default", () => {
     assert.deepEqual(defaultInjectedLibraries("/tmp/TestHelper.dylib"), ["/tmp/TestHelper.dylib"]);
 });
 
-test("Messages injects only its helper because ChatKit is already linked", () => {
+test("Messages injects only its ChatKit-independent helper", () => {
     assert.deepEqual(messagesInjectedLibraries("/tmp/BlueBubblesHelper.dylib"), [
         "/tmp/BlueBubblesHelper.dylib"
     ]);
