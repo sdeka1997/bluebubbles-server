@@ -11,9 +11,8 @@ test("dylib plugins inject only their helper by default", () => {
     assert.deepEqual(defaultInjectedLibraries("/tmp/TestHelper.dylib"), ["/tmp/TestHelper.dylib"]);
 });
 
-test("Messages preloads ChatKit before its helper", () => {
+test("Messages injects only its helper because ChatKit is already linked", () => {
     assert.deepEqual(messagesInjectedLibraries("/tmp/BlueBubblesHelper.dylib"), [
-        "/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework/ChatKit",
         "/tmp/BlueBubblesHelper.dylib"
     ]);
 });
@@ -27,9 +26,8 @@ test("FaceTime remains helper-only", () => {
 test("DYLD_INSERT_LIBRARIES preserves preload order", () => {
     assert.equal(
         injectedLibrariesEnvironmentValue([
-            "/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework/ChatKit",
             "/tmp/BlueBubblesHelper.dylib"
         ]),
-        "/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework/ChatKit:/tmp/BlueBubblesHelper.dylib"
+        "/tmp/BlueBubblesHelper.dylib"
     );
 });

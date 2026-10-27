@@ -1,8 +1,7 @@
-// ChatKit is a Catalyst framework; on macOS 15+ it only exists under iOSSupport.
-export const CHATKIT_PATH = "/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework/ChatKit";
-
 export const defaultInjectedLibraries = (dylibPath: string): string[] => [dylibPath];
 
-export const messagesInjectedLibraries = (dylibPath: string): string[] => [CHATKIT_PATH, dylibPath];
+// Messages already links ChatKit itself. Force-inserting the Catalyst framework
+// by path is rejected on Sequoia before the helper can load.
+export const messagesInjectedLibraries = (dylibPath: string): string[] => defaultInjectedLibraries(dylibPath);
 
 export const injectedLibrariesEnvironmentValue = (libraries: string[]): string => libraries.join(":");
