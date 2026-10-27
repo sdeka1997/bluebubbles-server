@@ -80,3 +80,47 @@ test("drops an ambiguous handle instead of merging two people", () => {
 test("returns null when Apple has no authoritative following list", () => {
     assert.equal(buildFindMyRoster({ contacts: {} }), null);
 });
+
+// macOS 14.4+ encrypts FriendCacheData.data. PR #810 decrypts it to a plist whose
+// friend ids carry trailing "~" padding (it strips them before use).
+const pad = (id: string): string => `${id}~~`;
+const encryptedFixture = () => {
+    const data: any = structuredClone(fixture);
+    data.contacts = Object.fromEntries(Object.entries(data.contacts).map(([id, contact]) => [pad(id), contact]));
+    for (const friend of [...data.following, ...data.followers]) friend.id = pad(friend.id);
+    for (const favorite of data.preferences.favorites) favorite.id = pad(favorite.id);
+    return data;
+};
+
+test("decrypted FMF payload with padded ids builds the same roster as the plaintext file", () => {
+    assert.deepEqual(buildFindMyRoster(encryptedFixture()), buildFindMyRoster(fixture));
+});
+
+test("decrypted FMF payload keeps aliases, favorites, owner exclusion, and ambiguity rules", () => {
+    const data = encryptedFixture();
+    data.followers[1].invitationFromHandles = ["shared@example.com"];
+    data.followers[2].invitationFromHandles = ["shared@example.com"];
+    const roster = buildFindMyRoster(data)!;
+
+    assert.equal(roster.aliases.get("dad-old@example.edu"), "person-dad");
+    assert.equal(roster.aliases.has("owner@example.com"), false);
+    assert.equal(roster.aliases.has("shared@example.com"), false);
+    assert.deepEqual([...roster.favorites], [["person-may", 1], ["person-dad", 0]]);
+    assert.equal(roster.names.get("person-phone"), "Phone Friend");
+});
+
+test("Apple's \"$null\" plist placeholder never becomes a handle or a name", () => {
+    const data = encryptedFixture();
+    data.following.push({
+        id: pad("person-pending"),
+        invitationAcceptedHandles: ["$null"],
+        invitationFromHandle: "$null",
+        invitationSentToHandle: "pending@example.com"
+    });
+    data.contacts[pad("person-pending")] = { displayName: "$null", shortName: "Pending" };
+    const roster = buildFindMyRoster(data)!;
+
+    assert.equal(roster.primaryHandles.get("person-pending"), "pending@example.com");
+    assert.equal(roster.aliases.has("$null"), false);
+    assert.equal(roster.names.get("person-pending"), "Pending");
+});
