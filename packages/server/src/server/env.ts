@@ -1,6 +1,9 @@
 import * as macosVersion from "macos-version";
 
 export const isMinSequoia = macosVersion.isGreaterThanOrEqualTo("15.0");
+// macOS 14.4 is where Apple started encrypting the Find My caches. At/after this version
+// friend locations are read by decrypting them rather than from the plaintext cache.
+export const isMinSonoma14_4 = macosVersion.isGreaterThanOrEqualTo("14.4");
 export const isMinSonoma = macosVersion.isGreaterThanOrEqualTo("14.0");
 export const isMinVentura = macosVersion.isGreaterThanOrEqualTo("13.0");
 export const isMinMonterey = macosVersion.isGreaterThanOrEqualTo("12.0");

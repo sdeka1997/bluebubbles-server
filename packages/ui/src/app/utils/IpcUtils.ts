@@ -2,6 +2,7 @@ import { ScheduledMessageItem } from 'app/components/tables/ScheduledMessagesTab
 import { ipcRenderer } from 'electron';
 import { MultiSelectValue } from '../types';
 import { showErrorToast, showSuccessToast } from './ToastUtils';
+import { FindMyKeysImportResponse, FindMyKeysStatusResponse } from './FindMyKeysUtils';
 
 export const getConfig = async () => {
     return await ipcRenderer.invoke('get-config');
@@ -23,6 +24,14 @@ export const getFcmConfig = async (): Promise<FcmConfig> => {
 
 export const getEnv = async () => {
     return await ipcRenderer.invoke('get-env');
+};
+
+export const getFindMyKeysStatus = async (): Promise<FindMyKeysStatusResponse> => {
+    return await ipcRenderer.invoke('get-findmy-keys-status');
+};
+
+export const importFindMyKeys = async (): Promise<FindMyKeysImportResponse> => {
+    return await ipcRenderer.invoke('import-findmy-keys');
 };
 
 export const getDevices = async () => {

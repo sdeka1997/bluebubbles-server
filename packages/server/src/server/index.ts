@@ -74,6 +74,10 @@ import { Alert } from "./databases/server/entity";
 import { getStartDelay } from "./utils/ConfigUtils";
 import { FindMyFriendsCache } from "./api/lib/findmy/FindMyFriendsCache";
 import { readFindMyRoster } from "./api/lib/findmy/FindMyFriendRoster";
+import { FindMyKeyManager } from "./api/lib/findmy/FindMyKeyManager";
+import { createFindMyKeyManager } from "./api/lib/findmy/FindMyKeyValidation";
+import { setFindMyKeyManager } from "./api/lib/findmy/FindMyKeyIpc";
+import { cleanupStaleFindMyTemp } from "./api/lib/findmy/decrypt/localStorageReader";
 import { ScheduledService } from "./lib/ScheduledService";
 import { getLogger } from "./lib/logging/Loggable";
 import { IMessageListener } from "./databases/imessage/listeners/IMessageListener";
@@ -178,6 +182,8 @@ class BlueBubblesServer extends EventEmitter {
 
     findMyCache: FindMyFriendsCache;
 
+    findMyKeys: FindMyKeyManager;
+
     iMessageListener: IMessageListener;
 
     hasSetup: boolean;
@@ -270,6 +276,7 @@ class BlueBubblesServer extends EventEmitter {
         this.region = null;
         this.typingCache = [];
         this.findMyCache = null;
+        this.findMyKeys = null;
     }
 
     emitToUI(event: string, data: any) {
@@ -735,6 +742,20 @@ class BlueBubblesServer extends EventEmitter {
         this.logger.info("Initializing FindMy Location cache...");
         this.findMyCache = new FindMyFriendsCache(() => readFindMyRoster(FileSystem.findMyFriendCachePath));
         this.findMyCache.refreshRoster(true);
+
+        // macOS 14.4+ reads Find My from encrypted caches with keys the user imports
+        this.findMyKeys = createFindMyKeyManager(FileSystem.findMyKeysDir, {
+            localStorageDbPath: FileSystem.findMyLocalStorageDbPath,
+            fmipCacheDir: FileSystem.findMyDir,
+            fmfCacheDir: FileSystem.findMyFmfCacheDir
+        });
+        setFindMyKeyManager(this.findMyKeys);
+        try {
+            // Plaintext copies of LocalStorage.db left behind if the app died mid-read
+            cleanupStaleFindMyTemp();
+        } catch (ex: any) {
+            this.logger.warn(`Failed to clean up stale Find My temp files! ${ex?.message ?? String(ex)}`);
+        }
 
         try {
             this.logger.info("Initializing caffeinate service...");

@@ -19,8 +19,23 @@ export const normalizeFindMyHandle = (handle: string): string => {
     return digits.length > 0 ? `tel:${digits}` : value;
 };
 
-const strings = (value: unknown): string[] =>
-    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+/**
+ * Apple pads friend ids with trailing "~" in the encrypted (macOS 14.4+) caches.
+ * Strip it so every source agrees on one id per friend.
+ */
+export const stripFindMyIdPadding = (id: string): string => id.replace(/~+$/, "");
+
+const friendId = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    const id = stripFindMyIdPadding(value);
+    return id.length > 0 ? id : null;
+};
+
+// Apple's plists store a literal "$null" where the plaintext JSON had null.
+const isText = (value: unknown): value is string =>
+    typeof value === "string" && value.trim().length > 0 && value !== "$null";
+
+const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter(isText) : []);
 
 /**
  * Builds the one-person-per-row roster used by Apple's Find My UI.
@@ -44,13 +59,15 @@ export const buildFindMyRoster = (data: any): FindMyRoster | null => {
 
     const handlesById = new Map<string, string[]>();
     for (const friend of following) {
-        if (typeof friend?.id !== "string") continue;
+        const id = friendId(friend?.id);
+        if (!id) continue;
         const accepted = strings(friend.invitationAcceptedHandles);
         const fallback = strings([friend.invitationFromHandle, friend.invitationSentToHandle]);
-        handlesById.set(friend.id, accepted.length > 0 ? accepted : fallback);
+        handlesById.set(id, accepted.length > 0 ? accepted : fallback);
     }
     for (const friend of followers) {
-        const handles = typeof friend?.id === "string" ? handlesById.get(friend.id) : undefined;
+        const id = friendId(friend?.id);
+        const handles = id ? handlesById.get(id) : undefined;
         if (handles) handles.push(...strings(friend.invitationFromHandles));
     }
 
@@ -71,17 +88,22 @@ export const buildFindMyRoster = (data: any): FindMyRoster | null => {
     for (const key of ambiguous) aliases.delete(key);
 
     const names = new Map<string, string>();
-    const contacts = data?.contacts && typeof data.contacts === "object" ? data.contacts : {};
+    const contacts: Record<string, any> = {};
+    if (data?.contacts && typeof data.contacts === "object") {
+        for (const [rawId, contact] of Object.entries(data.contacts)) {
+            const id = friendId(rawId);
+            if (id) contacts[id] = contact;
+        }
+    }
     for (const id of primaryHandles.keys()) {
-        const name = contacts[id]?.displayName ?? contacts[id]?.shortName;
-        if (typeof name === "string" && name.trim().length > 0) names.set(id, name);
+        const name = [contacts[id]?.displayName, contacts[id]?.shortName].find(isText);
+        if (name) names.set(id, name);
     }
 
     const favorites = new Map<string, number>();
     for (const favorite of Array.isArray(data?.preferences?.favorites) ? data.preferences.favorites : []) {
-        if (typeof favorite?.id === "string" && Number.isFinite(favorite?.order) && primaryHandles.has(favorite.id)) {
-            favorites.set(favorite.id, favorite.order);
-        }
+        const id = friendId(favorite?.id);
+        if (id && Number.isFinite(favorite?.order) && primaryHandles.has(id)) favorites.set(id, favorite.order);
     }
 
     return { aliases, primaryHandles, names, favorites };
