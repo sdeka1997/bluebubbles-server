@@ -248,7 +248,10 @@ export class MessageRouter {
             subject,
             selectedMessageGuid,
             partIndex,
-            ddScan
+            ddScan,
+            groupId,
+            participants,
+            service
         } = ctx?.request?.body ?? {};
 
         // Add to send cache
@@ -267,7 +270,8 @@ export class MessageRouter {
                 selectedMessageGuid,
                 tempGuid,
                 partIndex,
-                ddScan
+                ddScan,
+                chatLookup: { groupId, participants, service }
             });
 
             // Remove from cache
@@ -337,8 +341,20 @@ export class MessageRouter {
 
     static async sendAttachment(ctx: RouterContext, _: Next) {
         const { files } = ctx.request;
-        const { tempGuid, chatGuid, name, method, subject, selectedMessageGuid, partIndex, effectId, isAudioMessage } =
-            ctx.request?.body ?? {};
+        const {
+            tempGuid,
+            chatGuid,
+            name,
+            method,
+            subject,
+            selectedMessageGuid,
+            partIndex,
+            effectId,
+            isAudioMessage,
+            groupId,
+            participants,
+            service
+        } = ctx.request?.body ?? {};
         const attachment = files?.attachment as File;
 
         // Add to send cache
@@ -356,7 +372,8 @@ export class MessageRouter {
                 subject,
                 effectId,
                 selectedMessageGuid,
-                partIndex
+                partIndex,
+                chatLookup: { groupId, participants, service }
             });
 
             // Remove from cache
@@ -411,8 +428,20 @@ export class MessageRouter {
     }
 
     static async sendMultipartMessage(ctx: RouterContext, _: Next) {
-        let { parts, tempGuid, attributedBody, chatGuid, effectId, subject, selectedMessageGuid, partIndex, ddScan } =
-            ctx?.request?.body ?? {};
+        let {
+            parts,
+            tempGuid,
+            attributedBody,
+            chatGuid,
+            effectId,
+            subject,
+            selectedMessageGuid,
+            partIndex,
+            ddScan,
+            groupId,
+            participants,
+            service
+        } = ctx?.request?.body ?? {};
 
         // Add to send cache if tempGuid is provided
         if (isNotEmpty(tempGuid)) {
@@ -429,7 +458,8 @@ export class MessageRouter {
                 effectId,
                 selectedMessageGuid,
                 partIndex,
-                ddScan
+                ddScan,
+                chatLookup: { groupId, participants, service }
             });
 
             // Remove from cache
@@ -515,7 +545,10 @@ export class MessageRouter {
             isAudioMessage,
             chunkIndex,
             totalChunks,
-            isComplete = false
+            isComplete = false,
+            groupId,
+            participants,
+            service
         } = ctx.request?.body ?? {};
         const chunk = files?.chunk as File;
 
@@ -559,7 +592,8 @@ export class MessageRouter {
                     subject,
                     effectId,
                     selectedMessageGuid,
-                    partIndex
+                    partIndex,
+                    chatLookup: { groupId, participants, service }
                 });
 
                 // Remove from cache
@@ -631,7 +665,8 @@ export class MessageRouter {
     }
 
     static async react(ctx: RouterContext, _: Next) {
-        const { chatGuid, selectedMessageGuid, reaction, partIndex } = ctx?.request?.body ?? {};
+        const { chatGuid, selectedMessageGuid, reaction, partIndex, groupId, participants, service } =
+            ctx?.request?.body ?? {};
 
         // Fetch the message we are reacting to
         const message = await Server().iMessageRepo.getMessage(selectedMessageGuid, false, true);
@@ -639,7 +674,13 @@ export class MessageRouter {
 
         // Send the reaction
         try {
-            const sentMessage = await MessageInterface.sendReaction({ chatGuid, message, reaction, partIndex });
+            const sentMessage = await MessageInterface.sendReaction({
+                chatGuid,
+                message,
+                reaction,
+                partIndex,
+                chatLookup: { groupId, participants, service }
+            });
             return new Success(ctx, {
                 message: "Reaction sent!",
                 // No need to load the participants since we sent the message

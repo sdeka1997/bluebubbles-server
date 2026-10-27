@@ -7,6 +7,7 @@ import { PrivateApiAction } from ".";
 import type { ValidTapback, ValidRemoveTapback } from "@server/types";
 import type { TextFormatting } from "@server/api/types";
 import { isMinCatalina, isMinMonterey } from "@server/env";
+import { ChatLookup, withChatLookup } from "../chatLookup";
 
 export class PrivateApiMessage extends PrivateApiAction {
     tag = "PrivateApiMessage";
@@ -20,23 +21,27 @@ export class PrivateApiMessage extends PrivateApiAction {
         effectId: string = null,
         selectedMessageGuid: string = null,
         partIndex = 0,
-        ddScan = false
+        ddScan = false,
+        chatLookup: ChatLookup = null
     ): Promise<TransactionResult> {
         const action = "send-message";
         this.throwForNoMissingFields(action, [chatGuid, message]);
         const request = new TransactionPromise(TransactionType.MESSAGE);
 
-        const data: any = {
-            chatGuid,
-            subject,
-            message,
-            attributedBody,
-            // Commented out until confirmation that the helper dylib supports this.
-            // textFormatting,
-            effectId,
-            selectedMessageGuid,
-            partIndex
-        };
+        const data: any = withChatLookup(
+            {
+                chatGuid,
+                subject,
+                message,
+                attributedBody,
+                // Commented out until confirmation that the helper dylib supports this.
+                // textFormatting,
+                effectId,
+                selectedMessageGuid,
+                partIndex
+            },
+            chatLookup
+        );
 
         if (isMinCatalina) {
             data.ddScan = ddScan ? 1 : 0;
@@ -53,21 +58,25 @@ export class PrivateApiMessage extends PrivateApiAction {
         effectId: string = null,
         selectedMessageGuid: string = null,
         partIndex = 0,
-        ddScan = false
+        ddScan = false,
+        chatLookup: ChatLookup = null
     ): Promise<TransactionResult> {
         const action = "send-multipart";
         this.throwForNoMissingFields(action, [chatGuid, parts]);
         const request = new TransactionPromise(TransactionType.MESSAGE);
 
-        const data: any = {
-            chatGuid,
-            subject,
-            parts,
-            attributedBody,
-            effectId,
-            selectedMessageGuid,
-            partIndex
-        };
+        const data: any = withChatLookup(
+            {
+                chatGuid,
+                subject,
+                parts,
+                attributedBody,
+                effectId,
+                selectedMessageGuid,
+                partIndex
+            },
+            chatLookup
+        );
 
         if (isMinMonterey) {
             data.ddScan = ddScan ? 1 : 0;
@@ -80,7 +89,8 @@ export class PrivateApiMessage extends PrivateApiAction {
         chatGuid: string,
         selectedMessageGuid: string,
         reactionType: ValidTapback | ValidRemoveTapback,
-        partIndex?: number
+        partIndex?: number,
+        chatLookup: ChatLookup = null
     ): Promise<TransactionResult> {
         const action = "send-reaction";
         this.throwForNoMissingFields(action, [chatGuid, selectedMessageGuid, reactionType]);
@@ -88,12 +98,15 @@ export class PrivateApiMessage extends PrivateApiAction {
         const request = new TransactionPromise(TransactionType.MESSAGE);
         return this.sendApiMessage(
             action,
-            {
-                chatGuid,
-                selectedMessageGuid,
-                reactionType,
-                partIndex: partIndex ?? 0
-            },
+            withChatLookup(
+                {
+                    chatGuid,
+                    selectedMessageGuid,
+                    reactionType,
+                    partIndex: partIndex ?? 0
+                },
+                chatLookup
+            ),
             request
         );
     }
