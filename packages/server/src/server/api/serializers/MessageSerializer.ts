@@ -7,6 +7,7 @@ import { ChatSerializer } from "./ChatSerializer";
 import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from "./constants";
 import { HandleSerializer } from "./HandleSerializer";
 import type { MessageSerializerMultiParams, MessageSerializerSingleParams } from "./types";
+import { serializeAssociatedReaction } from "@server/api/reactions";
 
 export class MessageSerializer {
     static async serialize({
@@ -161,7 +162,11 @@ export class MessageSerializer {
             groupActionType: message.groupActionType,
             balloonBundleId: message.balloonBundleId,
             associatedMessageGuid: message.associatedMessageGuid,
-            associatedMessageType: message.associatedMessageType,
+            associatedMessageType: serializeAssociatedReaction(
+                message.associatedMessageType,
+                message.associatedMessageEmoji
+            ),
+            associatedMessageEmoji: message.associatedMessageEmoji,
             expressiveSendStyleId: message.expressiveSendStyleId,
             threadOriginatorGuid: message.threadOriginatorGuid,
             hasPayloadData: !!message.payloadData

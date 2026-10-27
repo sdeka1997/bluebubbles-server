@@ -9,6 +9,7 @@ import { FileSystem } from "@server/fileSystem";
 import { MessageInterface } from "@server/api/interfaces/messageInterface";
 import { isMinSequoia } from "@server/env";
 import { hasTextFormatting, validateTextFormatting } from "@server/utils/TextFormattingUtils";
+import { isValidReaction } from "@server/api/reactions";
 
 import { ValidateInput } from "./index";
 import { BadRequest } from "../responses/errors";
@@ -191,12 +192,16 @@ export class MessageValidator {
     static sendReactionRules = {
         chatGuid: "required|string",
         selectedMessageGuid: "required|string",
-        reaction: `required|string|in:${MessageInterface.possibleReactions.join(",")}`,
+        reaction: "required|string",
         partIndex: "numeric|min:0"
     };
 
     static async validateReaction(ctx: RouterContext, next: Next) {
-        ValidateInput(ctx.request?.body, MessageValidator.sendReactionRules);
+        const { reaction } = ValidateInput(ctx.request?.body, MessageValidator.sendReactionRules);
+        if (!isValidReaction(reaction, isMinSequoia)) {
+            throw new BadRequest({ error: "Invalid reaction descriptor provided!" });
+        }
+
         await next();
     }
 

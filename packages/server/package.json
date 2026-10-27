@@ -15,7 +15,8 @@
         "dist": "npm run build && electron-builder build --mac --publish never --config ./scripts/electron-builder-config.js",
         "release": "npm run build && electron-builder build --mac --publish always --config ./scripts/electron-builder-config.js",
         "rebuild": "electron-rebuild -f better-sqlite3 node-mac-contacts node-mac-permissions",
-        "postinstall": "electron-rebuild install-app-deps && npm run rebuild"
+        "postinstall": "electron-rebuild install-app-deps && npm run rebuild",
+        "test": "rimraf .test-dist && tsc --noEmit false --module commonjs --target ES2022 --moduleResolution node --esModuleInterop --skipLibCheck --outDir .test-dist test/*.test.ts src/server/api/reactions.ts src/server/api/privateApi/modes/dylibPlugins/injectedLibraries.ts src/server/databases/transformers/MessageTypeTransformer.ts && node --test .test-dist/test/*.test.js && rimraf .test-dist"
     },
     "husky": {
         "hooks": {

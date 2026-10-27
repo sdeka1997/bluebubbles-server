@@ -5,6 +5,7 @@ import { FileSystem } from "@server/fileSystem";
 import { hideApp } from "@server/api/apple/scripts";
 import { Loggable } from "@server/lib/logging/Loggable";
 import { ProcessSpawner } from "@server/lib/ProcessSpawner";
+import { defaultInjectedLibraries, injectedLibrariesEnvironmentValue } from "./injectedLibraries";
 
 export abstract class DylibPlugin extends Loggable {
     tag = "DylibPlugin";
@@ -26,6 +27,10 @@ export abstract class DylibPlugin extends Loggable {
     abstract get isEnabled(): boolean;
 
     abstract get dylibPath(): string;
+
+    get injectedLibraries(): string[] {
+        return defaultInjectedLibraries(this.dylibPath);
+    }
 
     constructor(name: string) {
         super();
@@ -122,7 +127,7 @@ export abstract class DylibPlugin extends Loggable {
                         restartOnNonZeroExit: false,
                         options: {
                             env: {
-                                DYLD_INSERT_LIBRARIES: this.dylibPath
+                                DYLD_INSERT_LIBRARIES: injectedLibrariesEnvironmentValue(this.injectedLibraries)
                             }
                         },
                     })
