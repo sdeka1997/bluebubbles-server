@@ -1,5 +1,6 @@
 import type { Message } from "@server/databases/imessage/entity/Message";
 import * as net from "net";
+import type { ChatLookup } from "@server/api/privateApi/chatLookup";
 
 export type SendMessageParams = {
     chatGuid: string;
@@ -13,6 +14,7 @@ export type SendMessageParams = {
     tempGuid?: string;
     partIndex?: number;
     ddScan?: boolean;
+    chatLookup?: ChatLookup;
 };
 
 export type SendMessagePrivateApiParams = {
@@ -25,6 +27,7 @@ export type SendMessagePrivateApiParams = {
     selectedMessageGuid?: string;
     partIndex?: number;
     ddScan?: boolean;
+    chatLookup?: ChatLookup;
 };
 
 export type SendAttachmentPrivateApiParams = {
@@ -36,6 +39,7 @@ export type SendAttachmentPrivateApiParams = {
     effectId?: string;
     selectedMessageGuid?: string;
     partIndex?: number;
+    chatLookup?: ChatLookup;
 };
 
 export type UnsendMessageParams = {
@@ -64,6 +68,7 @@ export type SendAttachmentParams = {
     effectId?: string;
     selectedMessageGuid?: string;
     partIndex?: number;
+    chatLookup?: ChatLookup;
 };
 
 export type SendReactionParams = {
@@ -72,6 +77,7 @@ export type SendReactionParams = {
     reaction: string;
     tempGuid?: string | null;
     partIndex?: number | null;
+    chatLookup?: ChatLookup;
 };
 
 export type SendMultipartTextParams = {
@@ -84,6 +90,7 @@ export type SendMultipartTextParams = {
     partIndex?: number;
     parts: Record<string, any>[];
     ddScan?: boolean;
+    chatLookup?: ChatLookup;
 };
 
 export type TextFormattingStyle = "bold" | "italic" | "underline" | "strikethrough";

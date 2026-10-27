@@ -1,25 +1,19 @@
-Source: https://github.com/sdeka1997/bluebubbles-helper/commit/7fdedfb166df373f83710a1a1a62a518676f7fc5
+Source: https://github.com/sdeka1997/bluebubbles-helper/commit/7fdedfb166df373f83710a1a1a62a518676f7fc5 merged with ff4f41e (branch seq/helper-integration c455e65)
 Upstream base: https://github.com/BlueBubblesApp/bluebubbles-helper/commit/df40280e0ae30c42cd45d0bab838dcc2d64c4c7a
+Includes: ChatKit-independent emoji Tapbacks (feat/emoji-tapbacks-imcore) + Private API send fallback by group ID / 1:1 handle (fix/private-api-send-fallback)
 Architectures: x86_64, arm64, arm64e
-SHA-256: 39c7dbd66e70c97e9d087ed2e887436832188e9a7f50b06dad9de474d6ff2105
+SHA-256: a8ceaa802b3185706c9b88954d173b6f43ce14eca78d7c258f4e7afc3f796667
 
 Dependency preparation:
-Run `pod install` in Messages/MacOS-11+ using the committed Podfile.lock. This
-build reused CocoaPods support files generated from an identical Podfile and
-Podfile.lock (CocoaAsyncSocket 7.6.5) because CocoaPods was not installed on the
-build host.
+Run `pod install` in Messages/MacOS-11+ using the committed Podfile.lock (Pods are tracked at df40280).
 
-Build command (from the helper repository root):
+Build command (from the helper repository root, on a merge of both branches):
 xcodebuild -workspace "Messages/MacOS-11+/BlueBubblesHelper.xcworkspace" \
   -scheme "BlueBubblesHelper DyLib" -configuration Release \
-  -derivedDataPath /tmp/wemoji-helper-minimal-universal-build \
+  -derivedDataPath /tmp/wseq-helper-build \
   ARCHS="x86_64 arm64 arm64e" ONLY_ACTIVE_ARCH=NO \
   CODE_SIGNING_ALLOWED=NO ENABLE_USER_SCRIPT_SANDBOXING=NO build
 
-Output:
-/tmp/wemoji-helper-minimal-universal-build/Build/Products/Release/BlueBubblesHelper.dylib
-
-Static acceptance gates, passed for every architecture:
+Static acceptance gates, checked for every architecture:
 - no `_OBJC_CLASS_$_CK*` undefined imports (`nm -arch <arch> -u`)
-- no `_OBJC_CLASS_$_CK*` fixups (`dyld_info -arch <arch> -fixups`)
-- `associatedMessageEmoji` selector embedded
+- `associatedMessageEmoji`, `existingChatWithGroupID:` and `getChatForSend::` selectors embedded

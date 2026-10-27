@@ -79,7 +79,10 @@ export class MessageValidator {
         selectedMessageGuid: "string",
         partIndex: "numeric|min:0",
         ddScan: "boolean",
-        textFormatting: "array"
+        textFormatting: "array",
+        groupId: "string",
+        participants: "array",
+        service: "string"
     };
 
     static async validateText(ctx: RouterContext, next: Next) {
@@ -152,7 +155,9 @@ export class MessageValidator {
         effectId: "string",
         subject: "string",
         selectedMessageGuid: "string",
-        partIndex: "numeric|min:0"
+        partIndex: "numeric|min:0",
+        groupId: "string",
+        service: "string"
     };
 
     static async validateAttachment(ctx: RouterContext, next: Next) {
@@ -193,7 +198,10 @@ export class MessageValidator {
         chatGuid: "required|string",
         selectedMessageGuid: "required|string",
         reaction: "required|string",
-        partIndex: "numeric|min:0"
+        partIndex: "numeric|min:0",
+        groupId: "string",
+        participants: "array",
+        service: "string"
     };
 
     static async validateReaction(ctx: RouterContext, next: Next) {
@@ -242,7 +250,10 @@ export class MessageValidator {
         selectedMessageGuid: "string",
         partIndex: "numeric|min:0",
         parts: "required|array",
-        ddScan: "boolean"
+        ddScan: "boolean",
+        groupId: "string",
+        participants: "array",
+        service: "string"
     };
 
     static async validateMultipart(ctx: RouterContext, next: Next) {
@@ -292,7 +303,9 @@ export class MessageValidator {
         effectId: "string",
         subject: "string",
         selectedMessageGuid: "string",
-        partIndex: "numeric|min:0"
+        partIndex: "numeric|min:0",
+        groupId: "string",
+        service: "string"
     };
 
     static async validateAttachmentChunk(ctx: RouterContext, next: Next) {

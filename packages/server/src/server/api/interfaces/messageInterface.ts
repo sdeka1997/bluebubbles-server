@@ -49,7 +49,8 @@ export class MessageInterface {
         selectedMessageGuid = null,
         tempGuid = null,
         partIndex = 0,
-        ddScan = false
+        ddScan = false,
+        chatLookup = null
     }: SendMessageParams): Promise<Message> {
         if (!chatGuid) throw new Error("No chat GUID provided");
 
@@ -114,7 +115,8 @@ export class MessageInterface {
                 effectId,
                 selectedMessageGuid,
                 partIndex,
-                ddScan
+                ddScan,
+                chatLookup
             });
 
             // We already have the exact message via its GUID, so resolve the awaiter directly
@@ -151,7 +153,8 @@ export class MessageInterface {
         effectId = null,
         selectedMessageGuid = null,
         partIndex = 0,
-        isAudioMessage = false
+        isAudioMessage = false,
+        chatLookup = null
     }: SendAttachmentParams): Promise<Message> {
         if (!chatGuid) throw new Error("No chat GUID provided");
 
@@ -201,7 +204,8 @@ export class MessageInterface {
                 effectId,
                 selectedMessageGuid,
                 partIndex,
-                isAudioMessage
+                isAudioMessage,
+                chatLookup
             });
 
             try {
@@ -250,7 +254,8 @@ export class MessageInterface {
         effectId = null,
         selectedMessageGuid = null,
         partIndex = 0,
-        ddScan = false
+        ddScan = false,
+        chatLookup = null
     }: SendMessagePrivateApiParams) {
         checkPrivateApiStatus();
         const result = await Server().privateApi.message.send(
@@ -262,7 +267,8 @@ export class MessageInterface {
             effectId ?? null,
             selectedMessageGuid ?? null,
             partIndex ?? 0,
-            ddScan ?? false
+            ddScan ?? false,
+            chatLookup
         );
 
         if (!result?.identifier) {
@@ -292,7 +298,8 @@ export class MessageInterface {
         effectId = null,
         selectedMessageGuid = null,
         partIndex = 0,
-        isAudioMessage = false
+        isAudioMessage = false,
+        chatLookup = null
     }: SendAttachmentPrivateApiParams): Promise<Message> {
         checkPrivateApiStatus();
 
@@ -314,7 +321,8 @@ export class MessageInterface {
             effectId,
             selectedMessageGuid,
             partIndex,
-            isAudioMessage
+            isAudioMessage,
+            chatLookup
         });
 
         if (!result?.identifier) {
@@ -415,7 +423,8 @@ export class MessageInterface {
         message,
         reaction,
         tempGuid = null,
-        partIndex = 0
+        partIndex = 0,
+        chatLookup = null
     }: SendReactionParams): Promise<Message> {
         checkPrivateApiStatus();
         if (!isValidReaction(reaction, isMinSequoia)) {
@@ -487,7 +496,13 @@ export class MessageInterface {
         Server().messageManager.add(awaiter);
 
         // Send the reaction
-        const result = await Server().privateApi.message.react(chatGuid, message.guid, reaction, partIndex ?? 0);
+        const result = await Server().privateApi.message.react(
+            chatGuid,
+            message.guid,
+            reaction,
+            partIndex ?? 0,
+            chatLookup
+        );
         if (!result?.identifier) {
             throw new Error("Failed to send reaction! No message GUID returned.");
         } else {
@@ -571,7 +586,8 @@ export class MessageInterface {
         selectedMessageGuid = null,
         partIndex = 0,
         parts = [],
-        ddScan = false
+        ddScan = false,
+        chatLookup = null
     }: SendMultipartTextParams): Promise<Message> {
         checkPrivateApiStatus();
         if (!chatGuid) throw new Error("No chat GUID provided");
@@ -597,7 +613,8 @@ export class MessageInterface {
             effectId ?? null,
             selectedMessageGuid ?? null,
             partIndex ?? 0,
-            ddScan ?? false
+            ddScan ?? false,
+            chatLookup
         );
 
         if (!result?.identifier) {

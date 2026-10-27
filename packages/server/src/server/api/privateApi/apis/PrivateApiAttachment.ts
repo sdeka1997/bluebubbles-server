@@ -5,6 +5,7 @@ import {
     TransactionType
 } from "@server/managers/transactionManager/transactionPromise";
 import { PrivateApiAction } from ".";
+import { ChatLookup, withChatLookup } from "../chatLookup";
 
 export class PrivateApiAttachment extends PrivateApiAction {
     tag = "PrivateApiAttachment";
@@ -17,7 +18,8 @@ export class PrivateApiAttachment extends PrivateApiAction {
         subject = null,
         effectId = null,
         selectedMessageGuid = null,
-        partIndex = 0
+        partIndex = 0,
+        chatLookup = null
     }: {
         chatGuid: string;
         filePath: string;
@@ -27,22 +29,26 @@ export class PrivateApiAttachment extends PrivateApiAction {
         effectId?: string;
         selectedMessageGuid?: string;
         partIndex?: number;
+        chatLookup?: ChatLookup;
     }): Promise<TransactionResult> {
         const action = "send-attachment";
         this.throwForNoMissingFields(action, [chatGuid, filePath]);
         const request = new TransactionPromise(TransactionType.ATTACHMENT);
         return this.sendApiMessage(
             action,
-            {
-                chatGuid,
-                filePath,
-                isAudioMessage: isAudioMessage ? 1 : 0,
-                attributedBody,
-                subject,
-                effectId,
-                selectedMessageGuid,
-                partIndex
-            },
+            withChatLookup(
+                {
+                    chatGuid,
+                    filePath,
+                    isAudioMessage: isAudioMessage ? 1 : 0,
+                    attributedBody,
+                    subject,
+                    effectId,
+                    selectedMessageGuid,
+                    partIndex
+                },
+                chatLookup
+            ),
             request
         );
     }
