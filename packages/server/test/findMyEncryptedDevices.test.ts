@@ -9,7 +9,7 @@ import {
     getEncryptedDevices,
     readEncryptedDevices
 } from "../src/server/api/lib/findmy/FindMyEncryptedBackend";
-import { CACHE_KEY, sealedCacheFile } from "./findMyCacheFixtures";
+import { CACHE_KEY, cacheFile, seal, sealedCacheFile } from "./findMyCacheFixtures";
 
 const withFindMyDir = async <T>(files: Record<string, Buffer>, fn: (dir: string) => T): Promise<Awaited<T>> => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "findmy-devices-test-"));
@@ -59,6 +59,22 @@ test("decrypts Devices, Items and ItemGroups and combines them like the plaintex
             assert.equal(devices[1].address.label, "Home");
         }
     ));
+
+test("a device's epoch-ms location timestamp survives the binary plist round trip", () => {
+    // Devices.data payload as Find My writes it, a binary plist (made with `plutil -convert binary1`):
+    // [{ id: "device-1", name: "iPhone", location: { latitude: 33.1, longitude: -96.6, timeStamp: 1793068000000 } }]
+    const devicesPlist = Buffer.from(
+        "YnBsaXN0MDChAdMCAwQFBgdSaWRUbmFtZVhsb2NhdGlvblhkZXZpY2UtMVZpUGhvbmXTCAkKCwwNWXRpbWVTdGFtcFlsb25naXR1ZGVYbGF0aXR1ZGUTAAABoXsuYwAjwFgmZmZmZmYjQECMzMzMzM0IChEUGSIrMjlDTVZfaAAAAAAAAAEBAAAAAAAAAA4AAAAAAAAAAAAAAAAAAABx",
+        "base64"
+    );
+
+    return withFindMyDir({ "Devices.data": cacheFile(seal(devicesPlist)) }, dir => {
+        const [device] = readEncryptedDevices(CACHE_KEY, dir);
+
+        assert.equal(device.id, "device-1");
+        assert.equal(device.location.timeStamp, 1793068000000);
+    });
+});
 
 test("missing Items or ItemGroups still returns the devices; nothing at all returns null", async () => {
     await withFindMyDir({ "Devices.data": sealedCacheFile([IPHONE]) }, dir => {
