@@ -90,6 +90,43 @@ test("refuses an implausibly large cache file before parsing it", async () => {
     await assert.rejects(async () => decryptCacheBuffer(oversized, KEY), /too large/);
 });
 
+// Binary plist with 8-byte integers (made with `plutil -convert binary1`):
+// { small: 42, timeStamp: 1793068000000, highBit: 1795215483648, negative: -1793068000000 }
+// `highBit` has bit 31 of its low word set; FMIP caches store epoch-ms timestamps this way.
+const INT64_PAYLOAD = Buffer.from(
+    "YnBsaXN0MDDUAQIDBAUGBwhZdGltZVN0YW1wV2hpZ2hCaXRVc21hbGxYbmVnYXRpdmUTAAABoXsuYwATAAABofsuYwAQKhP///5ehNGdAAgRGyMpMjtERgAAAAAAAAEBAAAAAAAAAAkAAAAAAAAAAAAAAAAAAABP",
+    "base64"
+);
+
+// [{ id: "device-1", serial: 1152921504606846976 }], i.e. 2^60, beyond Number.MAX_SAFE_INTEGER
+const BEYOND_SAFE_INTEGER_PAYLOAD = Buffer.from(
+    "YnBsaXN0MDChAdICAwQFUmlkVnNlcmlhbFhkZXZpY2UtMRMQAAAAAAAAAAgKDxIZIgAAAAAAAAEBAAAAAAAAAAYAAAAAAAAAAAAAAAAAAAAr",
+    "base64"
+);
+
+test("parsePlistBuffer decodes 8-byte binary plist integers without truncating them to 32 bits", () => {
+    assert.deepEqual(parsePlistBuffer(INT64_PAYLOAD), {
+        small: 42,
+        timeStamp: 1793068000000,
+        highBit: 1795215483648,
+        negative: -1793068000000
+    });
+});
+
+test("parsePlistBuffer returns integers beyond 2^53 as JSON-safe numbers", () => {
+    const [record] = parsePlistBuffer(BEYOND_SAFE_INTEGER_PAYLOAD);
+
+    assert.equal(record.serial, 2 ** 60);
+    assert.doesNotThrow(() => JSON.stringify(record));
+});
+
+test("parsePlistBuffer leaves its input buffer untouched", () => {
+    const input = Buffer.from(INT64_PAYLOAD);
+
+    parsePlistBuffer(input);
+    assert.deepEqual(input, INT64_PAYLOAD);
+});
+
 test("parsePlistBuffer refuses non-buffer and oversized input before parsing", () => {
     assert.throws(() => parsePlistBuffer("bplist00" as any), /expected a Buffer/);
     assert.throws(() => parsePlistBuffer(Buffer.alloc(MAX_PLIST_BYTES + 1)), /too large/);
