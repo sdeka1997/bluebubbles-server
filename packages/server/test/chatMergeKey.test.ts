@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildAddressToContactMap, chatMergeKey, normalizeAddress } from "../src/server/api/serializers/chatMergeKey.ts";
+import { buildAddressToContactMap, chatMergeKey, normalizeAddress } from "../src/server/api/serializers/chatMergeKey";
 
 // Cards and handles from the real server, redacted. The family chat is three
 // contacts; Bikash Moha is ONE card holding a phone number and two emails.
