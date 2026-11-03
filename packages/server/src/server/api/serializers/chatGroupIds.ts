@@ -1,3 +1,5 @@
+import { latestGroupTitles, QueryRunner } from "../../databases/imessage/helpers/latestGroupTitles";
+
 /**
  * Old group ids Messages keeps for a chat, from the chat's decoded `properties`
  * plist (`LegacyGroupIdentifiers`). Messages adds a group's previous ids here
@@ -17,4 +19,51 @@ export function legacyGroupIds(properties: NodeJS.Dict<any>[] | null | undefined
         }
     }
     return [...ids];
+}
+
+/** What the client needs to put every copy of a conversation in one thread. */
+export type ChatGroupingFields = {
+    originalGroupId: string | null;
+    legacyGroupIds: string[];
+    // Name after the newest rename; "" when it was cleared, null if never renamed.
+    latestGroupTitle: string | null;
+};
+
+const CHUNK = 500;
+
+async function originalGroupIds(run: QueryRunner, chatIds: number[]): Promise<Map<number, string | null>> {
+    const ids = new Map<number, string | null>();
+    for (let i = 0; i < chatIds.length; i += CHUNK) {
+        const part = chatIds.slice(i, i + CHUNK);
+        const rows = await run(
+            `SELECT ROWID, original_group_id FROM chat WHERE ROWID IN (${part.map(() => "?").join(", ")});`,
+            part
+        );
+        for (const row of rows) ids.set(Number(row.ROWID), row.original_group_id ?? null);
+    }
+    return ids;
+}
+
+/**
+ * Grouping fields for [chats], keyed by ROWID. Each lookup fails soft: older
+ * Macs lack `original_group_id`, and a locked database must not stop a chat
+ * from being sent.
+ */
+export async function groupingFields(
+    run: QueryRunner,
+    chats: Array<{ ROWID: number; properties: NodeJS.Dict<any>[] | null }>
+): Promise<Map<number, ChatGroupingFields>> {
+    const fields = new Map<number, ChatGroupingFields>();
+    if (chats.length === 0) return fields;
+    const ids = chats.map(c => c.ROWID);
+    const originals = await originalGroupIds(run, ids).catch((): Map<number, string | null> => new Map());
+    const titles = await latestGroupTitles(run, ids).catch((): Map<number, string> => new Map());
+    for (const chat of chats) {
+        fields.set(chat.ROWID, {
+            originalGroupId: originals.get(chat.ROWID) ?? null,
+            legacyGroupIds: legacyGroupIds(chat.properties),
+            latestGroupTitle: titles.has(chat.ROWID) ? titles.get(chat.ROWID) : null
+        });
+    }
+    return fields;
 }

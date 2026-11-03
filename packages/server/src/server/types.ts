@@ -104,6 +104,9 @@ export type ChatResponse = {
     isFilteredAsSpam?: boolean;
     displayName: string;
     groupId?: string;
+    originalGroupId?: string | null;
+    legacyGroupIds?: string[];
+    latestGroupTitle?: string | null;
     lastAddressedHandle?: string | null;
 };
 
