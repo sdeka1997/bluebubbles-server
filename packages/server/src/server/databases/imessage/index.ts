@@ -3,6 +3,7 @@ import { Brackets, DataSource, SelectQueryBuilder } from "typeorm";
 
 import { DBMessageParams, ChatParams, HandleParams, DBWhereItem } from "@server/databases/imessage/types";
 import { convertDateTo2001Time } from "@server/databases/imessage/helpers/dateUtil";
+import { messagePageOrder, totalFromPage, whereUsesAlias } from "@server/databases/imessage/helpers/messagePage";
 import { Chat } from "@server/databases/imessage/entity/Chat";
 import { Handle } from "@server/databases/imessage/entity/Handle";
 import { Message } from "@server/databases/imessage/entity/Message";
@@ -252,58 +253,69 @@ export class MessageRepository extends Loggable {
         if (after && typeof after === "number") after = new Date(after);
         if (before && typeof before === "number") before = new Date(before);
 
-        // Get messages with sender and the chat it's from
-        const query = this.db
-            .getRepository(Message)
-            .createQueryBuilder("message")
-            .leftJoinAndSelect("message.handle", "handle");
+        // The count leaves out the sender and attachment LEFT JOINs unless a
+        // filter reads them: they never add or drop a message, and on a large
+        // chat.db they made the count alone take seconds.
+        const buildQuery = (forCount: boolean) => {
+            // Get messages with sender and the chat it's from
+            const query = this.db.getRepository(Message).createQueryBuilder("message");
 
-        if (withAttachments)
-            query.leftJoinAndSelect(
-                "message.attachments",
-                "attachment"
-            );
+            if (!forCount || whereUsesAlias(where, "handle")) query.leftJoinAndSelect("message.handle", "handle");
 
-        // Inner-join because all messages will have a chat
-        if (chatGuid) {
-            query
-                .innerJoinAndSelect(
+            if (withAttachments && (!forCount || whereUsesAlias(where, "attachment")))
+                query.leftJoinAndSelect(
+                    "message.attachments",
+                    "attachment"
+                );
+
+            // Inner-join because all messages will have a chat
+            if (chatGuid) {
+                query
+                    .innerJoinAndSelect(
+                        "message.chats",
+                        "chat"
+                    )
+                    .andWhere("chat.guid = :guid", { guid: chatGuid });
+            } else if (withChats) {
+                query.innerJoinAndSelect(
                     "message.chats",
                     "chat"
-                )
-                .andWhere("chat.guid = :guid", { guid: chatGuid });
-        } else if (withChats) {
-            query.innerJoinAndSelect(
-                "message.chats",
-                "chat"
-            );
-        }
+                );
+            }
 
-        if (withChatParticipants) {
-            query.innerJoinAndSelect("chat.participants", "chandle");
-        }
+            if (withChatParticipants) {
+                query.innerJoinAndSelect("chat.participants", "chandle");
+            }
 
-        // Add any custom WHERE clauses
-        if (isNotEmpty(where)) {
-            query.andWhere(
-                new Brackets(qb => {
-                    for (const item of where) {
-                        qb.andWhere(item.statement, item.args);
-                    }
-                })
-            );
-        }
+            // Add any custom WHERE clauses
+            if (isNotEmpty(where)) {
+                query.andWhere(
+                    new Brackets(qb => {
+                        for (const item of where) {
+                            qb.andWhere(item.statement, item.args);
+                        }
+                    })
+                );
+            }
 
-        if (after || before) {
-            this.applyMessageDateQuery(query, after as Date, before as Date);
-        }
+            if (after || before) {
+                this.applyMessageDateQuery(query, after as Date, before as Date);
+            }
+
+            return query;
+        };
 
         // Add pagination params
-        query.orderBy(orderBy, sort);
+        const query = buildQuery(false);
+        const [first, ...rest] = messagePageOrder(orderBy, sort);
+        query.orderBy(...first);
+        for (const term of rest) query.addOrderBy(...term);
         query.skip(offset);
         query.take(limit);
 
-        return await query.getManyAndCount();
+        const messages = await query.getMany();
+        const total = totalFromPage(offset, limit, messages.length) ?? (await buildQuery(true).getCount());
+        return [messages, total];
     }
 
     /**

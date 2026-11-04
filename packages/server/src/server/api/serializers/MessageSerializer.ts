@@ -4,6 +4,7 @@ import { isMinHighSierra, isMinMonterey, isMinVentura } from "@server/env";
 import { HandleResponse, MessageResponse } from "@server/types";
 import { AttachmentSerializer } from "./AttachmentSerializer";
 import { ChatSerializer } from "./ChatSerializer";
+import { ChatGroupingFields, groupingFieldsForMessages } from "./chatGroupIds";
 import { DEFAULT_ATTACHMENT_CONFIG, DEFAULT_MESSAGE_CONFIG } from "./constants";
 import { HandleSerializer } from "./HandleSerializer";
 import type { MessageSerializerMultiParams, MessageSerializerSingleParams } from "./types";
@@ -32,6 +33,16 @@ export class MessageSerializer {
         attachmentConfig = DEFAULT_ATTACHMENT_CONFIG,
         isForNotification = false
     }: MessageSerializerMultiParams): Promise<MessageResponse[]> {
+        // One grouping lookup for every chat on the page, instead of one per
+        // message: a page of 200 spent seconds re-reading the same chats.
+        const grouping =
+            !isForNotification && { ...DEFAULT_MESSAGE_CONFIG, ...config }.includeChats
+                ? await groupingFieldsForMessages(
+                      (sql, params) => Server().iMessageRepo.db.query(sql, params),
+                      messages
+                  ).catch(() => new Map())
+                : null;
+
         // Convert the messages to their serialized versions
         const messageResponses: MessageResponse[] = [];
         for (const message of messages) {
@@ -40,7 +51,8 @@ export class MessageSerializer {
                     message: message,
                     config: { ...DEFAULT_MESSAGE_CONFIG, ...config },
                     attachmentConfig: { ...DEFAULT_ATTACHMENT_CONFIG, ...attachmentConfig },
-                    isForNotification
+                    isForNotification,
+                    grouping
                 })
             );
         }
@@ -125,8 +137,9 @@ export class MessageSerializer {
         message,
         config = DEFAULT_MESSAGE_CONFIG,
         attachmentConfig = DEFAULT_ATTACHMENT_CONFIG,
-        isForNotification = false
-    }: MessageSerializerSingleParams): Promise<MessageResponse> {
+        isForNotification = false,
+        grouping = null
+    }: MessageSerializerSingleParams & { grouping?: Map<number, ChatGroupingFields> | null }): Promise<MessageResponse> {
         let output: MessageResponse = {
             originalROWID: message.ROWID,
             guid: message.guid,
@@ -214,7 +227,8 @@ export class MessageSerializer {
             output.chats = await ChatSerializer.serializeList({
                 chats: message?.chats ?? [],
                 config: { includeParticipants: false, includeMessages: false },
-                isForNotification
+                isForNotification,
+                grouping
             });
         }
 

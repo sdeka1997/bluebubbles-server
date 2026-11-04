@@ -31,6 +31,11 @@ export type ChatGroupingFields = {
 
 const CHUNK = 500;
 
+type GroupingChat = { ROWID: number; style?: number; properties: NodeJS.Dict<any>[] | null };
+
+// chat.style of a one-to-one chat; groups are 43.
+const ONE_TO_ONE_STYLE = 45;
+
 async function originalGroupIds(run: QueryRunner, chatIds: number[]): Promise<Map<number, string | null>> {
     const ids = new Map<number, string | null>();
     for (let i = 0; i < chatIds.length; i += CHUNK) {
@@ -49,15 +54,15 @@ async function originalGroupIds(run: QueryRunner, chatIds: number[]): Promise<Ma
  * Macs lack `original_group_id`, and a locked database must not stop a chat
  * from being sent.
  */
-export async function groupingFields(
-    run: QueryRunner,
-    chats: Array<{ ROWID: number; properties: NodeJS.Dict<any>[] | null }>
-): Promise<Map<number, ChatGroupingFields>> {
+export async function groupingFields(run: QueryRunner, chats: GroupingChat[]): Promise<Map<number, ChatGroupingFields>> {
     const fields = new Map<number, ChatGroupingFields>();
     if (chats.length === 0) return fields;
     const ids = chats.map(c => c.ROWID);
+    // Only groups can be renamed, and searching a long one-to-one chat for a
+    // rename that cannot be there is most of the cost of this lookup.
+    const groupIds = chats.filter(c => c.style !== ONE_TO_ONE_STYLE).map(c => c.ROWID);
     const originals = await originalGroupIds(run, ids).catch((): Map<number, string | null> => new Map());
-    const titles = await latestGroupTitles(run, ids).catch((): Map<number, string> => new Map());
+    const titles = await latestGroupTitles(run, groupIds).catch((): Map<number, string> => new Map());
     for (const chat of chats) {
         fields.set(chat.ROWID, {
             originalGroupId: originals.get(chat.ROWID) ?? null,
@@ -66,4 +71,21 @@ export async function groupingFields(
         });
     }
     return fields;
+}
+
+/**
+ * Grouping fields for every chat of a page of [messages], from one lookup.
+ * Serializing each message's chats on their own ran it once per message.
+ */
+export async function groupingFieldsForMessages(
+    run: QueryRunner,
+    messages: Array<{ chats?: GroupingChat[] } | null>
+): Promise<Map<number, ChatGroupingFields>> {
+    const chats = new Map<number, GroupingChat>();
+    for (const message of messages) {
+        for (const chat of message?.chats ?? []) {
+            if (chat?.ROWID != null && !chats.has(chat.ROWID)) chats.set(chat.ROWID, chat);
+        }
+    }
+    return groupingFields(run, [...chats.values()]);
 }

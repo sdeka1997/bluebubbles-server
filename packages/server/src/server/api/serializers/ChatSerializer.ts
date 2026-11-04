@@ -31,12 +31,14 @@ export class ChatSerializer {
         config = DEFAULT_CHAT_CONFIG,
         messageConfig = DEFAULT_MESSAGE_CONFIG,
         handleConfig = DEFAULT_HANDLE_CONFIG,
-        isForNotification = false
-    }: ChatSerializerMutliParams): Promise<ChatResponse[]> {
+        isForNotification = false,
+        grouping: knownGrouping = null
+    }: ChatSerializerMutliParams & { grouping?: Map<number, ChatGroupingFields> | null }): Promise<ChatResponse[]> {
         // Fetched for the whole list at once: two queries however many chats.
+        // A message list passes in what it already fetched for all its chats.
         const grouping = isForNotification
             ? new Map()
-            : await groupingFields(
+            : knownGrouping ?? await groupingFields(
                   (sql, params) => Server().iMessageRepo.db.query(sql, params),
                   chats.filter(c => c?.ROWID != null)
               ).catch(() => new Map());
