@@ -233,6 +233,20 @@ test("a pause shorter than the quiet time does not end the round", async () => {
     assert.equal(refresh.round.collecting, true);
 });
 
+test("another fresh fix from an already located friend resets the quiet time", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(10_000);
+    world.report("dad");
+    await world.advance(FIND_MY_ROUND_QUIET_MS - 10_000);
+
+    world.report("dad");
+    await world.advance(20_000);
+
+    assert.equal(refresh.round.collecting, true, "Apple is still writing fresh locations");
+});
+
 test("a round ends once nothing new has arrived for the quiet time, and says so", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);

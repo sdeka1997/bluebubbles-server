@@ -110,6 +110,7 @@ export class FindMyLiveRefresh {
     private located = 0;
     private lastNewAt = 0;
     private longestPauseMs = 0;
+    private seenFixes = new Map<string, number>();
     private readonly viewers = new Set<string>();
     private cancelCheck: (() => void) | null = null;
     private readonly friends: Publisher;
@@ -186,6 +187,7 @@ export class FindMyLiveRefresh {
         this.located = 0;
         this.lastNewAt = now;
         this.longestPauseMs = 0;
+        this.seenFixes = new Map(this.io.friendLocations().map(friend => [friend.id, friend.at]));
         this.io.announceRound(this.round);
     }
 
@@ -201,12 +203,18 @@ export class FindMyLiveRefresh {
         const startedAt = this.current.startedAt;
         const friends = this.io.friendLocations();
         const located = friends.filter(friend => friend.at > startedAt).length;
+        const hasNewFix = friends.some(
+            friend => friend.at > startedAt && friend.at > (this.seenFixes.get(friend.id) ?? 0)
+        );
+        for (const friend of friends) {
+            this.seenFixes.set(friend.id, Math.max(friend.at, this.seenFixes.get(friend.id) ?? 0));
+        }
         const now = this.io.now();
-        if (located > this.located) {
+        if (hasNewFix) {
             if (this.located > 0) this.longestPauseMs = Math.max(this.longestPauseMs, now - this.lastNewAt);
-            this.located = located;
             this.lastNewAt = now;
         }
+        this.located = located;
         const everyone = friends.length > 0 && located === friends.length;
         if (!everyone && now - this.lastNewAt < FIND_MY_ROUND_QUIET_MS) return;
         this.io.log(
