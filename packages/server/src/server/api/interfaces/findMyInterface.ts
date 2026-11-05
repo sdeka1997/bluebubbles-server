@@ -12,7 +12,7 @@ import {
     hideFindMyFriends,
     isFindMyFriendsRunning
 } from "../apple/scripts";
-import { FileFingerprint, FindMyLiveRefresh } from "@server/api/lib/findmy/FindMyLiveRefresh";
+import { FileFingerprint, FindMyLiveRefresh, FindMyRound } from "@server/api/lib/findmy/FindMyLiveRefresh";
 import { FindMyDevice, FindMyItem, FindMyLocationItem } from "@server/api/lib/findmy/types";
 import { transformFindMyItemToDevice } from "@server/api/lib/findmy/utils";
 import {
@@ -34,7 +34,7 @@ import {
     refreshEncryptedFriends,
     selectFindMyBackend
 } from "@server/api/lib/findmy/FindMyEncryptedBackend";
-import { FIND_MY_DEVICES_UPDATED } from "@server/events";
+import { FIND_MY_DEVICES_UPDATED, FIND_MY_ROUND } from "@server/events";
 import { readFmfRosterData } from "@server/api/lib/findmy/decrypt/fmfReader";
 import { readFriendLocations } from "@server/api/lib/findmy/decrypt/localStorageReader";
 
@@ -117,6 +117,11 @@ export class FindMyInterface {
                 const devices = readEncryptedDevices(key, FileSystem.findMyDir);
                 if (devices) await Server().emitMessage(FIND_MY_DEVICES_UPDATED, devices, "normal", false, true);
             },
+            friendLocations: () =>
+                Server()
+                    .findMyCache.getAll()
+                    .map(friend => ({ id: friend.handle ?? "", at: friend.last_updated ?? 0 })),
+            announceRound: round => void Server().emitMessage(FIND_MY_ROUND, round, "normal", false, true),
             schedule: (fn, ms) => {
                 const timer = setTimeout(fn, ms);
                 return () => clearTimeout(timer);
@@ -127,9 +132,9 @@ export class FindMyInterface {
         return this.liveRefresh;
     }
 
-    /** Whether Find My is relaunched and publishing its writes, so new locations are on their way. */
-    static get isCollecting(): boolean {
-        return this.liveRefresh?.isActive ?? false;
+    /** The current round: whether new locations are on their way, and since when (ms). */
+    static get round(): FindMyRound {
+        return this.liveRefresh?.round ?? { collecting: false, startedAt: null };
     }
 
     /** A client's Find My screen opened or closed; Find My runs while one is open. */

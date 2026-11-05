@@ -30,7 +30,7 @@ export type EncryptedFriendsBackend = {
     label: (locations: FindMyLocationItem[]) => Promise<FindMyLocationItem[]>;
     /**
      * Starts (or joins) the live refresh that relaunches Find My and publishes its writes;
-     * `force` relaunches Find My even within the cooldown
+     * `force` relaunches Find My and starts a new round even during one
      */
     startLiveRefresh: (force: boolean) => void;
     /** Labels, stores and emits the locations that changed (the new-findmy-location path) */

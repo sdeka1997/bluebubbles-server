@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FindMyLiveRefresh, LiveRefreshIo } from "../src/server/api/lib/findmy/FindMyLiveRefresh";
+import {
+    FIND_MY_ROUND_QUIET_MS,
+    FindMyLiveRefresh,
+    FindMyRound,
+    LiveRefreshIo
+} from "../src/server/api/lib/findmy/FindMyLiveRefresh";
 
 type Fingerprint = { size: number; mtimeMs: number; ino: number };
 
@@ -11,7 +16,13 @@ const settle = async () => {
 
 /** Find My, its files and a clock, all fake. `advance` runs due timers in order. */
 const fakeWorld = (
-    options: { neverStarts?: boolean; readyAfterMs?: number; startsMidLaunch?: boolean; refusesQuits?: number } = {}
+    options: {
+        neverStarts?: boolean;
+        readyAfterMs?: number;
+        startsMidLaunch?: boolean;
+        refusesQuits?: number;
+        friends?: string[];
+    } = {}
 ) => {
     const calls: string[] = [];
     const logs: string[] = [];
@@ -26,6 +37,9 @@ const fakeWorld = (
     let timers: { at: number; fn: () => void; id: number }[] = [];
     let nextId = 0;
     let refusals = options.refusesQuits ?? 0;
+    // Each friend's newest fix, as the friends cache holds it (0: no location)
+    const fixes = new Map<string, number>((options.friends ?? ["dad", "mom", "kid"]).map(id => [id, 0]));
+    const rounds: FindMyRound[] = [];
     let releasePublish: (() => void) | null = null;
     let blockPublish = false;
 
@@ -63,6 +77,8 @@ const fakeWorld = (
                 timers = timers.filter(timer => timer.id !== id);
             };
         },
+        friendLocations: () => [...fixes].map(([id, at]) => ({ id, at })),
+        announceRound: round => rounds.push(round),
         now: () => now,
         log: message => logs.push(message)
     };
@@ -100,6 +116,13 @@ const fakeWorld = (
         logs,
         advance,
         touch,
+        rounds,
+        /** Find My wrote a new fix for `id`, taken now */
+        report: (id: string) => {
+            fixes.set(id, now);
+            touch("db");
+        },
+        launches: () => calls.filter(call => call === "launch-hidden").length,
         isRunning: () => running,
         pendingTimers: () => timers.length,
         blockPublishes: () => (blockPublish = true),
@@ -123,8 +146,6 @@ test("relaunches Find My hidden, waiting only until each step has happened", asy
     await world.advance(400);
     assert.match(world.logs.join("\n"), /relaunched Find My/);
     assert.equal(world.isRunning(), true);
-    // Quit registered at 200 ms and launch at 300 ms after it: the whole relaunch is under a
-    // second, where the old bounce slept 3 + 5 + 15 s regardless.
     assert.ok(refresh.isActive);
 });
 
@@ -147,42 +168,202 @@ test("publishes friends as soon as Find My writes their file, and devices as soo
     assert.deepEqual(world.calls, ["publish-friends", "publish-devices"]);
 });
 
-test("a refresh requested while one is collecting does not relaunch Find My", async () => {
+test("opening the screen starts a round and says when it started", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await world.advance(5000);
+
+    refresh.setViewer("pixel", true);
+    assert.deepEqual(refresh.round, { collecting: true, startedAt: 5000 }, "known at once, before Find My is up");
+    assert.deepEqual(world.rounds, [{ collecting: true, startedAt: 5000 }]);
+    await world.advance(1000);
+    assert.equal(world.launches(), 1);
+});
+
+test("reopening the screen during a round joins it rather than relaunching Find My", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
     refresh.setViewer("pixel", true);
-    await world.advance(1000);
-
-    assert.equal(await refresh.start(), false);
-    await world.advance(1000);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 1);
-});
-
-test("opening the Find My screen relaunches Find My hidden", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
+    await world.advance(5000);
+    world.report("dad");
+    await world.advance(6000);
+    refresh.setViewer("pixel", false);
+    await world.advance(7000);
 
     refresh.setViewer("pixel", true);
     await world.advance(1000);
-    assert.deepEqual(world.calls, ["quit", "launch-hidden"]);
-    assert.ok(refresh.isActive);
+    assert.equal(world.launches(), 1);
+    assert.deepEqual(refresh.round, { collecting: true, startedAt: 0 }, "the round's own start, not the reopen");
+    assert.match(world.logs.join("\n"), /joining the round started 18 s ago/);
 });
 
-test("closing the last Find My screen quits Find My at once and stops checking", async () => {
+test("leaving during a round keeps Find My running until Apple goes quiet, then quits it", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(5000);
+    world.report("dad");
+    await world.advance(6000);
+    refresh.setViewer("pixel", false);
+
+    await world.advance(50_000);
+    assert.equal(world.isRunning(), true, "Apple may still be sending");
+    world.report("mom");
+    await world.advance(FIND_MY_ROUND_QUIET_MS - 2000);
+    assert.equal(world.isRunning(), true, "a new location keeps the round going");
+
+    await world.advance(5000);
+    assert.equal(refresh.round.collecting, false);
+    assert.equal(world.isRunning(), false);
+    assert.equal(refresh.isActive, false);
+    assert.equal(world.pendingTimers(), 0, "no checks keep running");
+    assert.deepEqual(world.rounds.at(-1), { collecting: false, startedAt: 0 });
+});
+
+test("a pause shorter than the quiet time does not end the round", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(10_000);
+    world.report("dad");
+    // 34 s: the longest pause seen mid-round on 2026-11-04
+    await world.advance(34_000);
+    world.report("mom");
+    await world.advance(34_000);
+    assert.equal(refresh.round.collecting, true);
+});
+
+test("a round ends once nothing new has arrived for the quiet time, and says so", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(10_000);
+    world.report("dad");
+    await world.advance(30_000);
+    world.report("mom");
+
+    await world.advance(FIND_MY_ROUND_QUIET_MS + 2000);
+    assert.equal(refresh.round.collecting, false);
+    assert.deepEqual(world.rounds.at(-1), { collecting: false, startedAt: 0 });
+    assert.match(world.logs.join("\n"), /round over: 2 of 3 located; longest pause 30 s/);
+});
+
+test("a round ends as soon as every friend has a location newer than its start", async () => {
+    const world = fakeWorld({ friends: ["dad", "mom"] });
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(5000);
+    world.report("dad");
+    await world.advance(5000);
+    world.report("mom");
+
+    await world.advance(2000);
+    assert.equal(refresh.round.collecting, false);
+    assert.match(world.logs.join("\n"), /round over: 2 of 2 located/);
+});
+
+test("a fix older than the round does not count as new", async () => {
+    const world = fakeWorld({ friends: ["dad"] });
+    const refresh = new FindMyLiveRefresh(world.io);
+    await world.advance(10_000);
+    world.report("dad");
+    await world.advance(50_000);
+
     refresh.setViewer("pixel", true);
     await world.advance(30_000);
+    assert.equal(refresh.round.collecting, true, "dad's fix predates the round");
+});
+
+test("the screen staying open after the round ends keeps Find My running; closing it then quits at once", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
+    assert.equal(refresh.round.collecting, false);
+    assert.equal(world.isRunning(), true);
+
+    world.touch("db");
+    await world.advance(1000);
+    assert.equal(world.calls.at(-1), "publish-friends", "writes are still published while someone looks");
 
     refresh.setViewer("pixel", false);
     await world.advance(1000);
-    assert.equal(refresh.isActive, false);
-    assert.equal(world.calls.filter(call => call === "quit").length, 2, "quits Find My when the screen closes");
     assert.equal(world.isRunning(), false);
-    assert.equal(world.pendingTimers(), 0, "no checks keep running after the screen closes");
+    assert.equal(world.pendingTimers(), 0);
 });
 
-test("an open Find My screen keeps it collecting for as long as it stays open", async () => {
+test("opening the screen after a round has ended starts a new round", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+    refresh.setViewer("pixel", false);
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
+    assert.equal(world.isRunning(), false);
+
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+    assert.equal(world.launches(), 2);
+    assert.deepEqual(refresh.round, { collecting: true, startedAt: 1000 + 2 * FIND_MY_ROUND_QUIET_MS });
+});
+
+test("a forced refresh during a round relaunches Find My and starts a new round", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(20_000);
+    world.calls.length = 0;
+
+    void refresh.start({ force: true });
+    assert.deepEqual(refresh.round, { collecting: true, startedAt: 20_000 });
+    await world.advance(1000);
+    assert.deepEqual(world.calls, ["quit", "launch-hidden"]);
+    assert.ok(refresh.isActive);
+    assert.equal(world.pendingTimers(), 1, "one file check keeps running, not two");
+});
+
+test("a forced refresh while Find My is still starting joins that start", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(250);
+
+    assert.equal(await refresh.start({ force: true }), false);
+    await world.advance(1000);
+    assert.equal(world.launches(), 1);
+});
+
+test("a refresh requested with no Find My screen open runs its round, then quits Find My", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    const relaunched = refresh.start();
+    await world.advance(2000);
+    assert.equal(await relaunched, true);
+    assert.equal(world.isRunning(), true);
+
+    await world.advance(FIND_MY_ROUND_QUIET_MS);
+    assert.equal(world.isRunning(), false);
+});
+
+test("Find My keeps running until every open Find My screen has closed", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    refresh.setViewer("tablet", true);
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
+
+    refresh.setViewer("pixel", false);
+    await world.advance(1000);
+    assert.ok(refresh.isActive, "another screen is still open");
+
+    refresh.setViewer("tablet", false);
+    await world.advance(1000);
+    assert.equal(refresh.isActive, false);
+    assert.equal(world.launches(), 1);
+});
+
+test("an open Find My screen keeps it publishing for as long as it stays open", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
     refresh.setViewer("pixel", true);
@@ -194,135 +375,36 @@ test("an open Find My screen keeps it collecting for as long as it stays open", 
     assert.equal(world.calls.at(-1), "publish-friends");
 });
 
-test("Find My keeps running until every open Find My screen has closed", async () => {
+test("a write during a publish is published again once that publish finishes", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
     refresh.setViewer("pixel", true);
-    refresh.setViewer("tablet", true);
     await world.advance(1000);
+    world.calls.length = 0;
 
-    refresh.setViewer("pixel", false);
+    world.blockPublishes();
+    world.touch("db");
     await world.advance(1000);
-    assert.ok(refresh.isActive, "another screen is still open");
+    world.touch("db");
+    await world.advance(3000);
+    assert.deepEqual(world.calls, ["publish-friends"], "one publish at a time");
 
-    refresh.setViewer("tablet", false);
+    world.releasePublish();
     await world.advance(1000);
-    assert.equal(refresh.isActive, false);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 1);
+    assert.deepEqual(world.calls, ["publish-friends", "publish-friends"]);
 });
 
-test("a screen that closes while Find My is still starting quits it once it is up", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(250);
-    refresh.setViewer("pixel", false);
-
-    await world.advance(2000);
-    assert.equal(refresh.isActive, false);
-    assert.equal(world.isRunning(), false);
-    assert.equal(world.pendingTimers(), 0);
-});
-
-test("a refresh requested with no Find My screen open quits Find My once it has started", async () => {
-    const world = fakeWorld();
+test("a Find My that never starts ends the round, so the next one can try again", async () => {
+    const world = fakeWorld({ neverStarts: true });
     const refresh = new FindMyLiveRefresh(world.io);
 
     const relaunched = refresh.start();
-    await world.advance(2000);
-    assert.equal(await relaunched, true);
-    assert.equal(refresh.isActive, false, "nobody is looking, so nothing is collected");
-    assert.equal(world.isRunning(), false);
-});
-
-test("reopening the screen two minutes after the last relaunch relaunches Find My again", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(1000);
-    refresh.setViewer("pixel", false);
-    await world.advance(2 * 60 * 1000);
-
-    refresh.setViewer("pixel", true);
-    await world.advance(1000);
-    assert.ok(refresh.isActive);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 2);
-});
-
-test("reopening the screen within two minutes of the last relaunch leaves Find My closed", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(1000);
-    refresh.setViewer("pixel", false);
-    await world.advance(60 * 1000);
-    world.calls.length = 0;
-
-    refresh.setViewer("pixel", true);
-    assert.equal(refresh.isActive, false, "a caller can tell at once that nothing is being collected");
-    await world.advance(5000);
-    assert.deepEqual(world.calls, [], "Find My is neither relaunched nor quit");
-    assert.equal(world.isRunning(), false);
-    assert.match(world.logs.join("\n"), /relaunched .* ago; not relaunching/);
-});
-
-test("the cooldown counts from the last relaunch, not from when the screen closed", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(110 * 1000);
-    refresh.setViewer("pixel", false);
-    await world.advance(15 * 1000);
-
-    refresh.setViewer("pixel", true);
-    await world.advance(1000);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 2);
-});
-
-test("a forced refresh relaunches Find My during the cooldown", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(1000);
-    refresh.setViewer("pixel", false);
-    await world.advance(30 * 1000);
-    refresh.setViewer("pixel", true);
-    await world.advance(1000);
+    await world.advance(30_000);
+    assert.equal(await relaunched, false);
     assert.equal(refresh.isActive, false);
-
-    void refresh.start({ force: true });
-    assert.ok(refresh.isActive);
-    await world.advance(1000);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 2);
-    assert.ok(refresh.isActive, "the screen is open, so it keeps collecting");
-});
-
-test("a forced refresh while collecting relaunches Find My and keeps collecting", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(6 * 60 * 1000);
-    world.calls.length = 0;
-
-    void refresh.start({ force: true });
-    await world.advance(1000);
-    assert.deepEqual(world.calls, ["quit", "launch-hidden"]);
-    assert.ok(refresh.isActive);
-    assert.equal(world.pendingTimers(), 1, "one file check keeps running, not two");
-    world.touch("db");
-    await world.advance(1000);
-    assert.equal(world.calls.at(-1), "publish-friends");
-});
-
-test("a forced refresh while Find My is still starting joins that start", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    await world.advance(250);
-
-    assert.equal(await refresh.start({ force: true }), false);
-    await world.advance(1000);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 1);
+    assert.equal(refresh.round.collecting, false);
+    assert.match(world.logs.join("\n"), /did not start/);
+    assert.equal(world.pendingTimers(), 0);
 });
 
 test("Find My counts as up only once it has finished starting, not when its process appears", async () => {
@@ -336,14 +418,14 @@ test("Find My counts as up only once it has finished starting, not when its proc
     assert.match(world.logs.join("\n"), /relaunched Find My/);
 });
 
-test("leaving while Find My is still starting quits it once it has finished starting", async () => {
+test("leaving right after opening quits Find My cleanly once the round ends", async () => {
     const world = fakeWorld({ readyAfterMs: 2000 });
     const refresh = new FindMyLiveRefresh(world.io);
     refresh.setViewer("pixel", true);
     await world.advance(600);
     refresh.setViewer("pixel", false);
 
-    await world.advance(4000);
+    await world.advance(FIND_MY_ROUND_QUIET_MS + 5000);
     assert.doesNotMatch(world.logs.join("\n"), /failed to quit/);
     assert.equal(world.isRunning(), false);
     assert.equal(refresh.isActive, false);
@@ -361,7 +443,7 @@ test("coming back while Find My is still starting keeps it running", async () =>
     await world.advance(4000);
     assert.ok(refresh.isActive);
     assert.equal(world.isRunning(), true);
-    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 1);
+    assert.equal(world.launches(), 1);
 });
 
 test("a Find My that is still starting when a refresh begins is quit only once it is up", async () => {
@@ -381,22 +463,10 @@ test("a quit Find My refuses is asked again until it quits", async () => {
     const world = fakeWorld({ refusesQuits: 2 });
     const refresh = new FindMyLiveRefresh(world.io);
     refresh.setViewer("pixel", true);
-    await world.advance(2000);
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
     refresh.setViewer("pixel", false);
 
     await world.advance(3000);
     assert.equal(world.isRunning(), false);
     assert.doesNotMatch(world.logs.join("\n"), /failed to quit/);
-});
-
-test("a relaunch nobody was looking at does not start the cooldown", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    const relaunched = refresh.start();
-    await world.advance(2000);
-    assert.equal(await relaunched, true);
-
-    refresh.setViewer("pixel", true);
-    await world.advance(2000);
-    assert.ok(refresh.isActive, "the first look is not held back by a relaunch it never saw");
 });
