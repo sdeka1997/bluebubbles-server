@@ -1067,8 +1067,8 @@ export class SocketRoutes {
         });
 
         /**
-         * The client's Find My screen opened or closed. While it is open, a Find My refresh
-         * keeps publishing new locations; closing it lets the refresh finish.
+         * The client's Find My screen opened or closed. Find My on this Mac runs while one is
+         * open, publishing new locations as it writes them, and quits when the last one closes.
          */
         socket.on("findmy-screen", (params, cb): void => {
             FindMyInterface.setFindMyViewer(socket.id, params?.open === true);

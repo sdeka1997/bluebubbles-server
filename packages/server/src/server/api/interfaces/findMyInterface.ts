@@ -75,8 +75,8 @@ export class FindMyInterface {
     private static liveRefresh: FindMyLiveRefresh | null = null;
 
     /**
-     * The one live refresh for macOS 14.4+: relaunches Find My hidden, publishes friends and
-     * devices as Find My writes them, and quits it once collecting is done.
+     * The one live refresh for macOS 14.4+: relaunches Find My hidden while a Find My screen is
+     * open, publishes friends and devices as Find My writes them, and quits it when the last closes.
      */
     private static getLiveRefresh(): FindMyLiveRefresh {
         if (this.liveRefresh) return this.liveRefresh;
@@ -125,7 +125,7 @@ export class FindMyInterface {
         return this.liveRefresh;
     }
 
-    /** A client's Find My screen opened or closed; an open screen keeps the refresh collecting. */
+    /** A client's Find My screen opened or closed; Find My runs while one is open. */
     static setFindMyViewer(clientId: string, open: boolean): void {
         if (!isMinSonoma14_4) return;
         this.getLiveRefresh().setViewer(clientId, open);

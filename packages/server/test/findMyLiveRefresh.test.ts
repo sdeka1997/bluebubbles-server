@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-    FIND_MY_COLLECT_MS,
-    FindMyLiveRefresh,
-    LiveRefreshIo
-} from "../src/server/api/lib/findmy/FindMyLiveRefresh";
+import { FindMyLiveRefresh, LiveRefreshIo } from "../src/server/api/lib/findmy/FindMyLiveRefresh";
 
 type Fingerprint = { size: number; mtimeMs: number; ino: number };
 
@@ -102,14 +98,14 @@ test("relaunches Find My hidden, waiting only until each step has happened", asy
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
 
-    const relaunched = refresh.start();
+    refresh.setViewer("pixel", true);
     await world.advance(150);
     assert.deepEqual(world.calls, ["quit"], "waits for Find My to finish quitting before launching it");
 
     await world.advance(100);
     assert.deepEqual(world.calls, ["quit", "launch-hidden"]);
     await world.advance(400);
-    assert.equal(await relaunched, true);
+    assert.match(world.logs.join("\n"), /relaunched Find My/);
     assert.equal(world.isRunning(), true);
     // Quit registered at 200 ms and launch at 300 ms after it: the whole relaunch is under a
     // second, where the old bounce slept 3 + 5 + 15 s regardless.
@@ -119,7 +115,7 @@ test("relaunches Find My hidden, waiting only until each step has happened", asy
 test("publishes friends as soon as Find My writes their file, and devices as soon as theirs change", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
-    void refresh.start();
+    refresh.setViewer("pixel", true);
     await world.advance(1000);
     world.calls.length = 0;
 
@@ -138,7 +134,7 @@ test("publishes friends as soon as Find My writes their file, and devices as soo
 test("a refresh requested while one is collecting does not relaunch Find My", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
-    void refresh.start();
+    refresh.setViewer("pixel", true);
     await world.advance(1000);
 
     assert.equal(await refresh.start(), false);
@@ -146,60 +142,101 @@ test("a refresh requested while one is collecting does not relaunch Find My", as
     assert.equal(world.calls.filter(call => call === "launch-hidden").length, 1);
 });
 
-test("with nobody watching, collects for five minutes then quits Find My and stops checking", async () => {
+test("opening the Find My screen relaunches Find My hidden", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
-    void refresh.start();
 
-    await world.advance(FIND_MY_COLLECT_MS - 1000);
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+    assert.deepEqual(world.calls, ["quit", "launch-hidden"]);
     assert.ok(refresh.isActive);
-    assert.equal(world.calls.filter(call => call === "quit").length, 1);
-
-    await world.advance(2000);
-    assert.equal(refresh.isActive, false);
-    assert.equal(world.calls.filter(call => call === "quit").length, 2, "quits Find My at the end");
-    await world.advance(1000);
-    assert.equal(world.pendingTimers(), 0, "no checks keep running after the refresh ends");
 });
 
-test("an open Find My screen keeps it collecting past five minutes, until the screen closes", async () => {
+test("closing the last Find My screen quits Find My at once and stops checking", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
     refresh.setViewer("pixel", true);
-    void refresh.start();
-
-    await world.advance(FIND_MY_COLLECT_MS + 60_000);
-    assert.ok(refresh.isActive, "still collecting while the screen is open");
-
-    world.touch("db");
-    await world.advance(1000);
-    assert.equal(world.calls.at(-1), "publish-friends");
-
-    refresh.setViewer("pixel", false);
-    await world.advance(1000);
-    assert.equal(refresh.isActive, false);
-    assert.equal(world.calls.filter(call => call === "quit").length, 2);
-});
-
-test("closing the screen early still collects for the full five minutes", async () => {
-    const world = fakeWorld();
-    const refresh = new FindMyLiveRefresh(world.io);
-    refresh.setViewer("pixel", true);
-    void refresh.start();
     await world.advance(30_000);
 
     refresh.setViewer("pixel", false);
-    await world.advance(60_000);
-    assert.ok(refresh.isActive);
-
-    await world.advance(FIND_MY_COLLECT_MS);
+    await world.advance(1000);
     assert.equal(refresh.isActive, false);
+    assert.equal(world.calls.filter(call => call === "quit").length, 2, "quits Find My when the screen closes");
+    assert.equal(world.isRunning(), false);
+    assert.equal(world.pendingTimers(), 0, "no checks keep running after the screen closes");
+});
+
+test("an open Find My screen keeps it collecting for as long as it stays open", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+
+    await world.advance(60 * 60 * 1000);
+    assert.ok(refresh.isActive);
+    world.touch("db");
+    await world.advance(1000);
+    assert.equal(world.calls.at(-1), "publish-friends");
+});
+
+test("Find My keeps running until every open Find My screen has closed", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    refresh.setViewer("tablet", true);
+    await world.advance(1000);
+
+    refresh.setViewer("pixel", false);
+    await world.advance(1000);
+    assert.ok(refresh.isActive, "another screen is still open");
+
+    refresh.setViewer("tablet", false);
+    await world.advance(1000);
+    assert.equal(refresh.isActive, false);
+    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 1);
+});
+
+test("a screen that closes while Find My is still starting quits it once it is up", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(250);
+    refresh.setViewer("pixel", false);
+
+    await world.advance(2000);
+    assert.equal(refresh.isActive, false);
+    assert.equal(world.isRunning(), false);
+    assert.equal(world.pendingTimers(), 0);
+});
+
+test("a refresh requested with no Find My screen open quits Find My once it has started", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    const relaunched = refresh.start();
+    await world.advance(2000);
+    assert.equal(await relaunched, true);
+    assert.equal(refresh.isActive, false, "nobody is looking, so nothing is collected");
+    assert.equal(world.isRunning(), false);
+});
+
+test("reopening the screen after closing it relaunches Find My again", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+    refresh.setViewer("pixel", false);
+    await world.advance(1000);
+
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+    assert.ok(refresh.isActive);
+    assert.equal(world.calls.filter(call => call === "launch-hidden").length, 2);
 });
 
 test("a write during a publish is published again once that publish finishes", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
-    void refresh.start();
+    refresh.setViewer("pixel", true);
     await world.advance(1000);
     world.calls.length = 0;
 

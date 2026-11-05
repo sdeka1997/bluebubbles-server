@@ -23,13 +23,6 @@ export type LiveRefreshIo = {
     log: (message: string) => void;
 };
 
-/**
- * How long a refresh keeps collecting after it starts, even with nobody watching. Measured on
- * 2026-11-04 after a 30-minute quiet spell: 43% of friends had reported a new location within a
- * minute and 82% within five, so a quick look still leaves most of them fresh for the next visit.
- */
-export const FIND_MY_COLLECT_MS = 5 * 60 * 1000;
-
 /** How often Find My's files are checked for a new write. Each check is a few stat() calls. */
 const CHECK_MS = 1000;
 
@@ -88,17 +81,16 @@ class Publisher {
 }
 
 /**
- * One refresh of Find My, as Apple's app produces it: Find My only locates people when it is
- * launched, then keeps writing new locations for minutes. So a refresh relaunches it hidden,
- * publishes each write as it lands, and quits it once five minutes have passed and no Find My
- * screen is open on a client. A refresh requested while one is collecting joins that one.
+ * Find My on this Mac mirrors the Find My screen on the clients. Find My only locates people when
+ * it is launched, so opening a screen relaunches it hidden and each location it writes is
+ * published as it lands; closing the last open screen quits it. A refresh requested while one is
+ * collecting joins that one.
  */
 export class FindMyLiveRefresh {
     private active = false;
-    private startedAt = 0;
+    private starting = false;
     private readonly viewers = new Set<string>();
     private cancelCheck: (() => void) | null = null;
-    private cancelEnd: (() => void) | null = null;
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
@@ -112,10 +104,11 @@ export class FindMyLiveRefresh {
         return this.active;
     }
 
-    /** A client's Find My screen opened or closed. Closing the last one may end the refresh. */
+    /** A client's Find My screen opened or closed. Opening one starts a refresh; closing the last ends it. */
     setViewer(id: string, open: boolean): void {
         if (open) {
             this.viewers.add(id);
+            void this.start();
             return;
         }
         if (this.viewers.delete(id)) this.endIfDone();
@@ -124,11 +117,12 @@ export class FindMyLiveRefresh {
     /**
      * Starts a refresh unless one is collecting. Resolves true once Find My is running and its
      * writes are being published, false if a refresh was already running or Find My did not start.
+     * With no Find My screen open by then, nobody is looking, so it quits Find My straight away.
      */
     async start(): Promise<boolean> {
         if (this.active) return false;
         this.active = true;
-        this.startedAt = this.io.now();
+        this.starting = true;
         // Writes from here on are new to the client, which was just sent the current snapshot
         this.friends.baseline();
         this.devices.baseline();
@@ -143,15 +137,14 @@ export class FindMyLiveRefresh {
         } catch (error) {
             this.io.log(`Find My refresh: ${error instanceof Error ? error.message : error}`);
             this.active = false;
+            this.starting = false;
             return false;
         }
 
+        this.starting = false;
         this.io.log("Find My refresh: relaunched Find My; publishing locations as it writes them");
         this.check();
-        this.cancelEnd = this.io.schedule(() => {
-            this.cancelEnd = null;
-            this.endIfDone();
-        }, FIND_MY_COLLECT_MS);
+        this.endIfDone();
         return true;
     }
 
@@ -175,13 +168,13 @@ export class FindMyLiveRefresh {
         this.cancelCheck = this.io.schedule(() => this.check(), CHECK_MS);
     }
 
+    /** Ends the refresh once no Find My screen is open; a refresh still starting ends when it is up. */
     private endIfDone(): void {
-        if (!this.active || this.cancelEnd || this.viewers.size > 0) return;
-        if (this.io.now() - this.startedAt < FIND_MY_COLLECT_MS) return;
+        if (!this.active || this.starting || this.viewers.size > 0) return;
         this.active = false;
         this.cancelCheck?.();
         this.cancelCheck = null;
-        this.io.log("Find My refresh: finished collecting; quitting Find My");
+        this.io.log("Find My refresh: no Find My screen is open; quitting Find My");
         void this.io.quitFindMy().catch(error => this.io.log(`Find My refresh: failed to quit Find My: ${error}`));
     }
 }
