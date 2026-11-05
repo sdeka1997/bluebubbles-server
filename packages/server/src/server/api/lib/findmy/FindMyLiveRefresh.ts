@@ -53,7 +53,8 @@ export type FindMyRoundEnd = "everyone" | "quiet" | "failed" | "superseded";
 
 /**
  * One round of locating: from a relaunch of Find My until every friend has reported or Apple goes
- * quiet. `id` grows by one per round, so clients can tell which round an end belongs to; `endedBy`
+ * quiet. `id` grows by one per round and keeps growing across server restarts (it counts on from
+ * the moment this server started), so clients can tell which round an end belongs to; `endedBy`
  * is null while the round collects.
  */
 export type FindMyRound = { id: number; collecting: boolean; startedAt: number | null; endedBy: FindMyRoundEnd | null };
@@ -133,6 +134,9 @@ export class FindMyLiveRefresh {
         const onError = (error: unknown) => io.log(`Find My refresh: failed to publish an update: ${error}`);
         this.friends = new Publisher(io.friendFiles, io.stat, io.publishFriends, onError);
         this.devices = new Publisher(io.deviceFiles, io.stat, io.publishDevices, onError);
+        // Round ids count on from when this server started, so a client that saw rounds before a
+        // restart never mistakes a new round for an older one
+        this.current = { ...NO_FIND_MY_ROUND, id: io.now() };
     }
 
     /** Whether Find My is running and its writes are being published. */

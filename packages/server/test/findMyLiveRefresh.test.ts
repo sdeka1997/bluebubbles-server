@@ -575,3 +575,20 @@ test("each round's end is announced once", async () => {
 
     assert.equal(world.rounds.filter(round => round.id === 1 && !round.collecting).length, 1);
 });
+
+test("round ids keep growing across a server restart", async () => {
+    const world = fakeWorld();
+    const before = new FindMyLiveRefresh(world.io);
+    before.setViewer("pixel", true);
+    await world.advance(1000);
+    void before.start({ force: true });
+    await world.advance(3 * FIND_MY_ROUND_QUIET_MS);
+    const lastBefore = before.round.id;
+
+    // A restart builds a new coordinator; clients still hold the old round's id
+    const after = new FindMyLiveRefresh(world.io);
+    void after.start();
+    await world.advance(1000);
+
+    assert.ok(after.round.id > lastBefore, `${after.round.id} should be after ${lastBefore}`);
+});
