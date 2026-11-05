@@ -134,6 +134,7 @@ export class FindMyLiveRefresh {
     /** A client's Find My screen opened or closed. Opening one starts or joins a round. */
     setViewer(id: string, open: boolean): void {
         if (open) {
+            if (this.viewers.has(id)) return;
             this.viewers.add(id);
             void this.start();
             return;

@@ -321,6 +321,21 @@ test("opening the screen after a round has ended starts a new round", async () =
     assert.deepEqual(refresh.round, { collecting: true, startedAt: 1000 + 2 * FIND_MY_ROUND_QUIET_MS });
 });
 
+test("reporting an already-open viewer again does not start another round", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
+    assert.equal(refresh.round.collecting, false);
+    assert.equal(world.launches(), 1);
+
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+
+    assert.equal(world.launches(), 1);
+    assert.equal(refresh.round.collecting, false);
+});
+
 test("a forced refresh during a round relaunches Find My and starts a new round", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);
