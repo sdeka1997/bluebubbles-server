@@ -21,6 +21,7 @@ import {
     supportsSecureLocationCacheReader
 } from "@server/api/lib/findmy/SecureLocationReader";
 import { startBackgroundFindMyRefresh } from "@server/api/lib/findmy/BackgroundFindMyRefresh";
+import { triggerFriendRefresh } from "@server/api/lib/findmy/helperFriendRefresh";
 import { PrivateApiFindMyEventHandler } from "@server/api/privateApi/eventHandlers/PrivateApiFindMyEventHandler";
 import { FindMyAddressLabeler, createAppleGeocodeBatch } from "@server/api/lib/findmy/AppleReverseGeocoder";
 import {
@@ -92,7 +93,17 @@ export class FindMyInterface {
                 }
                 return labeled.current;
             },
-            bounce: () => this.refreshLocationsAccessibility(),
+            bounce: async () => {
+                await triggerFriendRefresh(
+                    {
+                        connected: () =>
+                            Boolean(Server().repo.getConfig("enable_private_api")) && Server().privateApi.helper,
+                        refreshFriends: () => Server().privateApi.findmy.refreshFriends()
+                    },
+                    () => this.refreshLocationsAccessibility(),
+                    log
+                );
+            },
             isFindMyRunning: () => this.isFindMyRunning(),
             quitFindMy: async () => {
                 await FileSystem.executeAppleScript(quitFindMyFriends());
