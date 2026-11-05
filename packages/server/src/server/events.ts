@@ -32,3 +32,4 @@ export const THEME_BACKUP_UPDATED = "theme-backup-updated";
 export const IMESSAGE_ALIASES_REMOVED = "imessage-aliases-removed";
 export const FT_CALL_STATUS_CHANGED = "ft-call-status-changed";
 export const NEW_FINDMY_LOCATION = "new-findmy-location";
+export const FIND_MY_DEVICES_UPDATED = "findmy-devices-updated";

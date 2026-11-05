@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
     EncryptedFriendsBackend,
+    readEncryptedFriends,
     refreshEncryptedFriends,
     selectFindMyBackend
 } from "../src/server/api/lib/findmy/FindMyEncryptedBackend";
@@ -53,12 +54,8 @@ const fakeBackend = (overrides: Partial<EncryptedFriendsBackend> = {}) => {
         },
         cache,
         label: async items => items.map(item => ({ ...item, short_address: "Dallas, TX", long_address: "Dallas, TX" })),
-        bounce: async () => {
-            calls.push("bounce");
-        },
-        isFindMyRunning: async () => true,
-        quitFindMy: async () => {
-            calls.push("quit");
+        startLiveRefresh: () => {
+            calls.push("start-live-refresh");
         },
         // Mirrors PrivateApiFindMyEventHandler.handleNewLocation: store, then emit only what changed
         publish: async items => {
@@ -99,49 +96,32 @@ test("missing LocalStorage or FMF key returns the current cache without launchin
     }
 });
 
-test("returns freshly decrypted, labelled friends before the background Find My bounce finishes", async () => {
-    let releaseBounce!: () => void;
-    const bounceBlocked = new Promise<void>(resolve => (releaseBounce = resolve));
-    const { backend, calls } = fakeBackend({
-        bounce: async () => {
-            calls.push("bounce");
-            await bounceBlocked;
-        }
-    });
+test("starts a live Find My refresh, then returns freshly decrypted, labelled friends without waiting on it", async () => {
+    const { backend, calls } = fakeBackend();
 
     const result = await refreshEncryptedFriends(backend);
 
-    assert.deepEqual(calls, ["bounce", "read-roster", "read-locations"]);
+    assert.deepEqual(calls, ["start-live-refresh", "read-roster", "read-locations"]);
     const dad = result.find(item => item.handle === "dad@example.com");
     assert.deepEqual(dad.coordinates, [33.1, -96.6]);
     assert.equal(dad.title, "Dad");
     assert.equal(dad.status, "shallow");
     assert.equal(dad.short_address, "Dallas, TX");
     // The roster keeps friends without a location visible
-    const mom = result.find(item => item.handle === "+15551234567");
-    assert.equal(mom.title, "Mom");
+    const mom = result.find(item => item.title === "Mom");
+    assert.ok(mom, "Mom is listed");
     assert.deepEqual(mom.coordinates, [0, 0]);
-
-    releaseBounce();
-    await settle();
 });
 
-test("after the bounce, re-reads and emits only the friends whose location changed, once", async () => {
+test("a later read publishes only the friends whose location changed", async () => {
     const { backend, cache, emitted, setLocations } = fakeBackend();
     const mom = (seconds: number) => ({ ...fix(40.7, -74, seconds), findMyId: "friend-2~" });
-    // Mirror production: publish labels before handing rows to handleNewLocation
-    const publish = backend.publish;
-    backend.publish = async items => publish(await backend.label(items));
-    let releaseBounce!: () => void;
-    const bounceBlocked = new Promise<void>(resolve => (releaseBounce = resolve));
-    backend.bounce = async () => bounceBlocked;
     setLocations([fix(33.1, -96.6, 0), mom(0)]);
-
     await refreshEncryptedFriends(backend);
-    // Find My fetched a newer fix for Dad only
+
+    // Find My wrote a newer fix for Dad only; the live refresh re-reads and publishes
     setLocations([fix(33.2, -96.7, 30), mom(0)]);
-    releaseBounce();
-    await settle();
+    await backend.publish(await backend.label(await readEncryptedFriends(backend)));
 
     assert.equal(emitted.length, 1);
     assert.deepEqual(
@@ -151,37 +131,15 @@ test("after the bounce, re-reads and emits only the friends whose location chang
     assert.deepEqual(cache.get("dad@example.com").coordinates, [33.2, -96.7]);
 });
 
-test("overlapping refreshes share one background Find My bounce", async () => {
-    let releaseBounce!: () => void;
-    const bounceBlocked = new Promise<void>(resolve => (releaseBounce = resolve));
-    const { backend, calls } = fakeBackend({
-        bounce: async () => {
-            calls.push("bounce");
-            await bounceBlocked;
-        }
-    });
+test("reading friends without the keys returns nothing and launches nothing", async () => {
+    const { backend, calls, logs } = fakeBackend({ loadFmfKey: async () => null });
 
-    await Promise.all([refreshEncryptedFriends(backend), refreshEncryptedFriends(backend)]);
-    releaseBounce();
-    await settle();
-
-    assert.equal(calls.filter(call => call === "bounce").length, 1);
-    assert.equal(calls.filter(call => call === "publish").length, 1);
+    assert.deepEqual(await readEncryptedFriends(backend), []);
+    assert.deepEqual(calls, []);
+    assert.match(logs.join("\n"), /FMF key/);
 });
 
-test("quits Find My after the background refresh only if it was not already running", async () => {
-    for (const wasRunning of [true, false]) {
-        const { backend, calls } = fakeBackend({ isFindMyRunning: async () => wasRunning });
-
-        await refreshEncryptedFriends(backend);
-        await settle();
-
-        assert.equal(calls.includes("quit"), !wasRunning);
-        if (!wasRunning) assert.equal(calls[calls.length - 1], "quit");
-    }
-});
-
-test("openFindMyApp=false reads the encrypted cache without bouncing Find My", async () => {
+test("openFindMyApp=false reads the encrypted cache without starting a refresh", async () => {
     const { backend, calls } = fakeBackend();
 
     const result = await refreshEncryptedFriends(backend, false);
@@ -219,7 +177,7 @@ test("a transient decrypt or read failure keeps serving the last good cache", as
         assert.deepEqual(cache.getAll(), lastGood);
     }
     assert.equal(emitted.length, 0);
-    assert.ok(logs.length >= 6, "foreground and background failures are both logged");
+    assert.ok(logs.length >= 3, "every failed read is logged");
 });
 
 test("macOS 14.4+ selects the encrypted backend; older versions keep the existing path", () => {

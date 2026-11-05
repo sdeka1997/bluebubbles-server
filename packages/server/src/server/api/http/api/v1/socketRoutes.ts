@@ -42,6 +42,7 @@ import { ChatSerializer } from "@server/api/serializers/ChatSerializer";
 import { HandleSerializer } from "@server/api/serializers/HandleSerializer";
 import { AttachmentSerializer } from "@server/api/serializers/AttachmentSerializer";
 import { MacOsInterface } from "@server/api/interfaces/macosInterface";
+import { FindMyInterface } from "@server/api/interfaces/findMyInterface";
 import { getLogger } from "@server/lib/logging/Loggable";
 import { ProxyServices } from "@server/databases/server/constants";
 
@@ -1065,8 +1066,19 @@ export class SocketRoutes {
             return response(cb, "save-vcf", createSuccessResponse(await GeneralInterface.checkForUpdate()));
         });
 
+        /**
+         * The client's Find My screen opened or closed. While it is open, a Find My refresh
+         * keeps publishing new locations; closing it lets the refresh finish.
+         */
+        socket.on("findmy-screen", (params, cb): void => {
+            FindMyInterface.setFindMyViewer(socket.id, params?.open === true);
+            return response(cb, "findmy-screen", createSuccessResponse(null, "Find My screen state recorded"));
+        });
+
         socket.on("disconnect", reason => {
             log.info(`Client ${socket.id} disconnected! Reason: ${reason}`);
+            // A client that drops can't say its Find My screen closed
+            FindMyInterface.setFindMyViewer(socket.id, false);
         });
     }
 }

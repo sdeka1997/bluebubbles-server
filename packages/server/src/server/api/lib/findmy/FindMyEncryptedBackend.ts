@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import { startBackgroundFindMyRefresh } from "./BackgroundFindMyRefresh";
 import { decryptCacheBuffer } from "./decrypt/cache";
 import { readCacheFile } from "./decrypt/plistUtils";
 import { buildEncryptedFriendItems, EncryptedFriendLocation } from "./EncryptedFriendMapper";
@@ -29,61 +28,62 @@ export type EncryptedFriendsBackend = {
     cache: Pick<FindMyFriendsCache, "setRoster" | "addAll" | "getAll">;
     /** Adds addresses for the response, within its time budget */
     label: (locations: FindMyLocationItem[]) => Promise<FindMyLocationItem[]>;
-    /** Quits, relaunches and re-hides Find My so it fetches fresh locations */
-    bounce: () => Promise<void>;
-    isFindMyRunning: () => Promise<boolean>;
-    quitFindMy: () => Promise<void>;
+    /** Starts (or joins) the live refresh that relaunches Find My and publishes its writes */
+    startLiveRefresh: () => void;
     /** Labels, stores and emits the locations that changed (the new-findmy-location path) */
     publish: (locations: FindMyLocationItem[]) => Promise<void>;
     log: (message: string) => void;
 };
 
 /**
+ * Decrypts the current friend list and coordinates. Returns [] when a key is missing or a
+ * read fails, after logging why; the caller keeps serving its last good cache.
+ */
+export const readEncryptedFriends = async (backend: EncryptedFriendsBackend): Promise<FindMyLocationItem[]> => {
+    const localStorageKey = backend.loadLocalStorageKey();
+    if (!localStorageKey) {
+        backend.log("Find My LocalStorage key is not imported; cannot read friend locations.");
+        return [];
+    }
+    const fmfKey = await backend.loadFmfKey();
+    if (!fmfKey) {
+        backend.log("Find My FMF key is not imported; cannot read the friend list.");
+        return [];
+    }
+    try {
+        const roster = buildFindMyRoster(backend.readRosterData(fmfKey));
+        if (!roster) throw new Error("Find My friend list has no `following` array");
+        backend.cache.setRoster(roster);
+        return buildEncryptedFriendItems(backend.readLocations(localStorageKey), roster);
+    } catch (error) {
+        // A transient read or decrypt failure keeps serving the last good cache
+        backend.log(`Failed to read Find My friends from the encrypted cache: ${error}`);
+        return [];
+    }
+};
+
+/**
  * Friends refresh for macOS 14.4+, where Find My keeps the friend list (FMF cache) and
- * friend coordinates (LocalStorage.db) encrypted. Returns the current decrypted snapshot
- * right away; a coalesced background bounce of Find My then re-reads and publishes changes.
+ * friend coordinates (LocalStorage.db) encrypted. Starts the live refresh, then returns the
+ * current decrypted snapshot; new locations follow over the socket as Find My writes them.
  */
 export const refreshEncryptedFriends = async (
     backend: EncryptedFriendsBackend,
     openFindMyApp = true
 ): Promise<FindMyLocationItem[]> => {
-    // Check the keys first: without them, bouncing Find My cannot produce anything we can read
-    const localStorageKey = backend.loadLocalStorageKey();
-    if (!localStorageKey) {
+    // Check the keys first: without them, relaunching Find My cannot produce anything we can read
+    if (!backend.loadLocalStorageKey()) {
         backend.log("Find My LocalStorage key is not imported; cannot read friend locations.");
         return backend.cache.getAll();
     }
-    const fmfKey = await backend.loadFmfKey();
-    if (!fmfKey) {
+    if (!(await backend.loadFmfKey())) {
         backend.log("Find My FMF key is not imported; cannot read the friend list.");
         return backend.cache.getAll();
     }
 
-    const readCurrent = (): FindMyLocationItem[] => {
-        const roster = buildFindMyRoster(backend.readRosterData(fmfKey));
-        if (!roster) throw new Error("Find My friend list has no `following` array");
-        backend.cache.setRoster(roster);
-        return buildEncryptedFriendItems(backend.readLocations(localStorageKey), roster);
-    };
-
-    if (openFindMyApp) {
-        // Quit afterwards only if Find My was not already open: the server owner may be using it
-        const wasRunning = await backend.isFindMyRunning();
-        startBackgroundFindMyRefresh(
-            backend.bounce,
-            readCurrent,
-            backend.publish,
-            error => backend.log(`Failed to refresh Find My friends from the encrypted cache: ${error}`),
-            wasRunning ? undefined : backend.quitFindMy
-        );
-    }
-
-    try {
-        backend.cache.addAll(await backend.label(readCurrent()));
-    } catch (error) {
-        // A transient read or decrypt failure keeps serving the last good cache
-        backend.log(`Failed to read Find My friends from the encrypted cache: ${error}`);
-    }
+    if (openFindMyApp) backend.startLiveRefresh();
+    const current = await readEncryptedFriends(backend);
+    if (current.length > 0) backend.cache.addAll(await backend.label(current));
     return backend.cache.getAll();
 };
 
@@ -131,14 +131,15 @@ export type EncryptedDevicesBackend = {
     loadFmipKey: () => Promise<Buffer | null>;
     /** Directory holding the FMIP caches (FileSystem.findMyDir in production) */
     findMyDir: string;
-    /** Quits, relaunches and re-hides Find My so it fetches fresh locations */
-    bounce: () => Promise<void>;
+    /** Starts (or joins) the live refresh that relaunches Find My and publishes its writes */
+    startLiveRefresh: () => void;
     log: (message: string) => void;
 };
 
 /**
- * Devices for macOS 14.4+. Checks the FMIP key before `refresh` bounces Find My: without the
- * key, the bounce cannot produce anything we can read.
+ * Devices for macOS 14.4+. Checks the FMIP key before `refresh` relaunches Find My: without
+ * the key, the relaunch cannot produce anything we can read. A refresh answers with the
+ * current devices at once; newer ones follow over the socket as Find My writes them.
  */
 export const getEncryptedDevices = async (
     backend: EncryptedDevicesBackend,
@@ -150,7 +151,7 @@ export const getEncryptedDevices = async (
         return null;
     }
 
-    if (refresh) await backend.bounce();
+    if (refresh) backend.startLiveRefresh();
     return readEncryptedDevices(fmipKey, backend.findMyDir, (file, error) =>
         backend.log(`Failed to read Find My ${file}: ${error}`)
     );

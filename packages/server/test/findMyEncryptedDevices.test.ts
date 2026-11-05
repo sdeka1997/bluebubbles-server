@@ -158,14 +158,14 @@ test("null entries inside the decrypted Items or ItemGroups are skipped", () =>
         }
     ));
 
-test("devices on 14.4+: a missing FMIP key returns null without bouncing Find My", async () => {
+test("devices on 14.4+: a missing FMIP key returns null without starting a refresh", async () => {
     const calls: string[] = [];
     const logs: string[] = [];
     const backend = (fmipKey: Buffer | null, dir: string): EncryptedDevicesBackend => ({
         loadFmipKey: async () => fmipKey,
         findMyDir: dir,
-        bounce: async () => {
-            calls.push("bounce");
+        startLiveRefresh: () => {
+            calls.push("start-live-refresh");
         },
         log: message => logs.push(message)
     });
@@ -178,6 +178,6 @@ test("devices on 14.4+: a missing FMIP key returns null without bouncing Find My
         assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir)), [IPHONE]);
         assert.deepEqual(calls, []);
         assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir), true), [IPHONE]);
-        assert.deepEqual(calls, ["bounce"]);
+        assert.deepEqual(calls, ["start-live-refresh"], "a refresh answers at once; changes follow as Find My writes them");
     });
 });
