@@ -8,9 +8,11 @@ import { FindMyInterface } from "@server/api/interfaces/findMyInterface";
 const isForced = (ctx: RouterContext): boolean => ctx.request.query?.force === "true";
 
 /**
- * Refresh answers carry the round as metadata: `collecting` (new locations follow over the
- * socket) and `startedAt` (ms; a location newer than this is from the round). Reopening a screen
- * during a round joins it, so clients measure their wait from `startedAt`, not from the reopen.
+ * Refresh answers carry the round as metadata: `id` (one per round), `collecting` (new locations
+ * follow over the socket), `startedAt` (ms; a location newer than this is from the round) and
+ * `endedBy` (why it stopped: everyone, quiet, failed or superseded; null while collecting).
+ * Reopening a screen during a round joins it, so clients measure their wait from `startedAt`,
+ * not from the reopen.
  */
 export class FindMyRouter {
     static async refreshDevices(ctx: RouterContext, _: Next) {

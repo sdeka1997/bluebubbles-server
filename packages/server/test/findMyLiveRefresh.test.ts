@@ -174,8 +174,12 @@ test("opening the screen starts a round and says when it started", async () => {
     await world.advance(5000);
 
     refresh.setViewer("pixel", true);
-    assert.deepEqual(refresh.round, { collecting: true, startedAt: 5000 }, "known at once, before Find My is up");
-    assert.deepEqual(world.rounds, [{ collecting: true, startedAt: 5000 }]);
+    assert.deepEqual(
+        refresh.round,
+        { id: 1, collecting: true, startedAt: 5000, endedBy: null },
+        "known at once, before Find My is up"
+    );
+    assert.deepEqual(world.rounds, [{ id: 1, collecting: true, startedAt: 5000, endedBy: null }]);
     await world.advance(1000);
     assert.equal(world.launches(), 1);
 });
@@ -193,7 +197,11 @@ test("reopening the screen during a round joins it rather than relaunching Find 
     refresh.setViewer("pixel", true);
     await world.advance(1000);
     assert.equal(world.launches(), 1);
-    assert.deepEqual(refresh.round, { collecting: true, startedAt: 0 }, "the round's own start, not the reopen");
+    assert.deepEqual(
+        refresh.round,
+        { id: 1, collecting: true, startedAt: 0, endedBy: null },
+        "the round's own start, not the reopen"
+    );
     assert.match(world.logs.join("\n"), /joining the round started 18 s ago/);
 });
 
@@ -217,7 +225,7 @@ test("leaving during a round keeps Find My running until Apple goes quiet, then 
     assert.equal(world.isRunning(), false);
     assert.equal(refresh.isActive, false);
     assert.equal(world.pendingTimers(), 0, "no checks keep running");
-    assert.deepEqual(world.rounds.at(-1), { collecting: false, startedAt: 0 });
+    assert.deepEqual(world.rounds.at(-1), { id: 1, collecting: false, startedAt: 0, endedBy: "quiet" });
 });
 
 test("a pause shorter than the quiet time does not end the round", async () => {
@@ -258,7 +266,7 @@ test("a round ends once nothing new has arrived for the quiet time, and says so"
 
     await world.advance(FIND_MY_ROUND_QUIET_MS + 2000);
     assert.equal(refresh.round.collecting, false);
-    assert.deepEqual(world.rounds.at(-1), { collecting: false, startedAt: 0 });
+    assert.deepEqual(world.rounds.at(-1), { id: 1, collecting: false, startedAt: 0, endedBy: "quiet" });
     assert.match(world.logs.join("\n"), /round over: 2 of 3 located; longest pause 30 s/);
 });
 
@@ -318,7 +326,12 @@ test("opening the screen after a round has ended starts a new round", async () =
     refresh.setViewer("pixel", true);
     await world.advance(1000);
     assert.equal(world.launches(), 2);
-    assert.deepEqual(refresh.round, { collecting: true, startedAt: 1000 + 2 * FIND_MY_ROUND_QUIET_MS });
+    assert.deepEqual(refresh.round, {
+        id: 2,
+        collecting: true,
+        startedAt: 1000 + 2 * FIND_MY_ROUND_QUIET_MS,
+        endedBy: null
+    });
 });
 
 test("reporting an already-open viewer again does not start another round", async () => {
@@ -360,7 +373,7 @@ test("a forced refresh during a round relaunches Find My and starts a new round"
     world.calls.length = 0;
 
     void refresh.start({ force: true });
-    assert.deepEqual(refresh.round, { collecting: true, startedAt: 20_000 });
+    assert.deepEqual(refresh.round, { id: 2, collecting: true, startedAt: 20_000, endedBy: null });
     await world.advance(1000);
     assert.deepEqual(world.calls, ["quit", "launch-hidden"]);
     assert.ok(refresh.isActive);
@@ -514,4 +527,51 @@ test("a quit Find My refuses is asked again until it quits", async () => {
     await world.advance(3000);
     assert.equal(world.isRunning(), false);
     assert.doesNotMatch(world.logs.join("\n"), /failed to quit/);
+});
+
+test("a round that ends because everyone reported says so", async () => {
+    const world = fakeWorld({ friends: ["dad", "mom"] });
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(5000);
+    world.report("dad");
+    world.report("mom");
+    await world.advance(2000);
+
+    assert.deepEqual(world.rounds.at(-1), { id: 1, collecting: false, startedAt: 0, endedBy: "everyone" });
+});
+
+test("a Find My that never starts ends its round as failed", async () => {
+    const world = fakeWorld({ neverStarts: true });
+    const refresh = new FindMyLiveRefresh(world.io);
+    const relaunched = refresh.start();
+    await world.advance(30_000);
+    await relaunched;
+
+    assert.deepEqual(world.rounds.at(-1), { id: 1, collecting: false, startedAt: 0, endedBy: "failed" });
+});
+
+test("a forced refresh ends the round it replaces before announcing the new one", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(20_000);
+
+    void refresh.start({ force: true });
+    await world.advance(1000);
+
+    assert.deepEqual(world.rounds, [
+        { id: 1, collecting: true, startedAt: 0, endedBy: null },
+        { id: 1, collecting: false, startedAt: 0, endedBy: "superseded" },
+        { id: 2, collecting: true, startedAt: 20_000, endedBy: null }
+    ]);
+});
+
+test("each round's end is announced once", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(3 * FIND_MY_ROUND_QUIET_MS);
+
+    assert.equal(world.rounds.filter(round => round.id === 1 && !round.collecting).length, 1);
 });

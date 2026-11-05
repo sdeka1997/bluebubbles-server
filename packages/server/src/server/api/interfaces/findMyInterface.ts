@@ -12,7 +12,12 @@ import {
     hideFindMyFriends,
     isFindMyFriendsRunning
 } from "../apple/scripts";
-import { FileFingerprint, FindMyLiveRefresh, FindMyRound } from "@server/api/lib/findmy/FindMyLiveRefresh";
+import {
+    FileFingerprint,
+    FindMyLiveRefresh,
+    FindMyRound,
+    NO_FIND_MY_ROUND
+} from "@server/api/lib/findmy/FindMyLiveRefresh";
 import { FindMyDevice, FindMyItem, FindMyLocationItem } from "@server/api/lib/findmy/types";
 import { transformFindMyItemToDevice } from "@server/api/lib/findmy/utils";
 import {
@@ -132,9 +137,9 @@ export class FindMyInterface {
         return this.liveRefresh;
     }
 
-    /** The current round: whether new locations are on their way, and since when (ms). */
+    /** The current round: its id, whether new locations are on their way, since when (ms), and how it ended. */
     static get round(): FindMyRound {
-        return this.liveRefresh?.round ?? { collecting: false, startedAt: null };
+        return this.liveRefresh?.round ?? NO_FIND_MY_ROUND;
     }
 
     /** A client's Find My screen opened or closed; Find My runs while one is open. */

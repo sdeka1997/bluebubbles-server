@@ -45,8 +45,20 @@ const STEP_LIMIT_MS = 20 * 1000;
  */
 export const FIND_MY_ROUND_QUIET_MS = 60 * 1000;
 
-/** One round of locating: from a relaunch of Find My until every friend has reported or Apple goes quiet. */
-export type FindMyRound = { collecting: boolean; startedAt: number | null };
+/**
+ * Why a round stopped collecting: every friend reported, none reported for the quiet time,
+ * Find My did not start, or a forced refresh replaced it with a new round.
+ */
+export type FindMyRoundEnd = "everyone" | "quiet" | "failed" | "superseded";
+
+/**
+ * One round of locating: from a relaunch of Find My until every friend has reported or Apple goes
+ * quiet. `id` grows by one per round, so clients can tell which round an end belongs to; `endedBy`
+ * is null while the round collects.
+ */
+export type FindMyRound = { id: number; collecting: boolean; startedAt: number | null; endedBy: FindMyRoundEnd | null };
+
+export const NO_FIND_MY_ROUND: FindMyRound = { id: 0, collecting: false, startedAt: null, endedBy: null };
 
 const sameFile = (a: FileFingerprint | null, b: FileFingerprint | null): boolean =>
     a === b || (!!a && !!b && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ino === b.ino);
@@ -106,7 +118,7 @@ class Publisher {
 export class FindMyLiveRefresh {
     private active = false;
     private starting = false;
-    private current: FindMyRound = { collecting: false, startedAt: null };
+    private current: FindMyRound = NO_FIND_MY_ROUND;
     private located = 0;
     private lastNewAt = 0;
     private longestPauseMs = 0;
@@ -175,7 +187,7 @@ export class FindMyLiveRefresh {
             this.io.log(`Find My refresh: ${error instanceof Error ? error.message : error}`);
             this.active = false;
             this.starting = false;
-            this.endRound();
+            this.endRound("failed");
             return false;
         }
 
@@ -186,8 +198,10 @@ export class FindMyLiveRefresh {
     }
 
     private beginRound(): void {
+        // A forced refresh replaces a round still collecting; clients hear that one end first
+        this.endRound("superseded");
         const now = this.io.now();
-        this.current = { collecting: true, startedAt: now };
+        this.current = { id: this.current.id + 1, collecting: true, startedAt: now, endedBy: null };
         this.located = 0;
         this.lastNewAt = now;
         this.longestPauseMs = 0;
@@ -195,9 +209,9 @@ export class FindMyLiveRefresh {
         this.io.announceRound(this.round);
     }
 
-    private endRound(): void {
+    private endRound(endedBy: FindMyRoundEnd): void {
         if (!this.current.collecting) return;
-        this.current = { ...this.current, collecting: false };
+        this.current = { ...this.current, collecting: false, endedBy };
         this.io.announceRound(this.round);
     }
 
@@ -225,7 +239,7 @@ export class FindMyLiveRefresh {
             `Find My refresh: round over: ${located} of ${friends.length} located; ` +
                 `longest pause ${Math.round(this.longestPauseMs / 1000)} s`
         );
-        this.endRound();
+        this.endRound(everyone ? "everyone" : "quiet");
         this.endIfDone();
     }
 
