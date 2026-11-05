@@ -1,6 +1,7 @@
 import { Server } from "@server";
 import path from "path";
 import fs from "fs";
+import child_process from "child_process";
 import { FileSystem } from "@server/fileSystem";
 import { isMinBigSur, isMinSonoma, isMinSonoma14_4 } from "@server/env";
 import { checkPrivateApiStatus, waitMs } from "@server/helpers/utils";
@@ -91,6 +92,7 @@ export class FindMyInterface {
         const friendsBackend = this.encryptedFriendsBackend();
         this.liveRefresh = new FindMyLiveRefresh({
             isFindMyRunning: () => this.isFindMyRunning(),
+            isFindMyReady: () => this.isFindMyReady(),
             quitFindMy: async () => {
                 await FileSystem.executeAppleScript(quitFindMyFriends());
             },
@@ -125,6 +127,11 @@ export class FindMyInterface {
         return this.liveRefresh;
     }
 
+    /** Whether Find My is relaunched and publishing its writes, so new locations are on their way. */
+    static get isCollecting(): boolean {
+        return this.liveRefresh?.isActive ?? false;
+    }
+
     /** A client's Find My screen opened or closed; Find My runs while one is open. */
     static setFindMyViewer(clientId: string, open: boolean): void {
         if (!isMinSonoma14_4) return;
@@ -143,7 +150,7 @@ export class FindMyInterface {
             readRosterData: key => readFmfRosterData(key, FileSystem.findMyFmfCacheDir),
             readLocations: key => readFriendLocations(key, FileSystem.findMyLocalStorageDbPath),
             cache: Server().findMyCache,
-            startLiveRefresh: () => void this.getLiveRefresh().start(),
+            startLiveRefresh: force => void this.getLiveRefresh().start({ force }),
             label: async locations => {
                 // Wait briefly for cities so the response carries them; slower ones follow over the socket
                 const labeler = this.getLabeler();
@@ -165,7 +172,7 @@ export class FindMyInterface {
         return {
             loadFmipKey: () => Server().findMyKeys.loadCacheKey("FMIP"),
             findMyDir: FileSystem.findMyDir,
-            startLiveRefresh: () => void this.getLiveRefresh().start(),
+            startLiveRefresh: force => void this.getLiveRefresh().start({ force }),
             log: message => Server().logger.info(message)
         };
     }
@@ -223,9 +230,9 @@ export class FindMyInterface {
         }
     }
 
-    static async refreshDevices(): Promise<Array<FindMyDevice> | null> {
+    static async refreshDevices(force = false): Promise<Array<FindMyDevice> | null> {
         return await selectFindMyBackend(isMinSonoma14_4, {
-            encrypted: () => getEncryptedDevices(this.encryptedDevicesBackend(), true),
+            encrypted: () => getEncryptedDevices(this.encryptedDevicesBackend(), true, force),
             legacy: async () => {
                 // Can't use the Private API to refresh devices yet
                 await this.refreshLocationsAccessibility();
@@ -234,9 +241,9 @@ export class FindMyInterface {
         });
     }
 
-    static async refreshFriends(openFindMyApp = true): Promise<FindMyLocationItem[]> {
+    static async refreshFriends(openFindMyApp = true, force = false): Promise<FindMyLocationItem[]> {
         return await selectFindMyBackend(isMinSonoma14_4, {
-            encrypted: () => refreshEncryptedFriends(this.encryptedFriendsBackend(), openFindMyApp),
+            encrypted: () => refreshEncryptedFriends(this.encryptedFriendsBackend(), openFindMyApp, force),
             legacy: () => this.refreshFriendsBefore14_4(openFindMyApp)
         });
     }
@@ -339,6 +346,21 @@ export class FindMyInterface {
         }
 
         return Server().findMyCache.getAll();
+    }
+
+    /**
+     * Whether Find My has finished starting (NSRunningApplication.finishedLaunching). Until then
+     * it refuses to quit. Unknown counts as ready: quitting is retried while it refuses anyway.
+     */
+    static async isFindMyReady(): Promise<boolean> {
+        const script =
+            'ObjC.import("AppKit"); const app = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.apple.findmy").firstObject; ' +
+            'app.isNil() ? "stopped" : app.finishedLaunching ? "ready" : "starting"';
+        return new Promise(resolve => {
+            child_process.execFile("/usr/bin/osascript", ["-l", "JavaScript", "-e", script], (error, stdout) =>
+                resolve(error ? true : String(stdout).trim() === "ready")
+            );
+        });
     }
 
     static async isFindMyRunning(): Promise<boolean> {

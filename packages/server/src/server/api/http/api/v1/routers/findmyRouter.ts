@@ -4,13 +4,21 @@ import { Success } from "../responses/success";
 import { ServerError } from "../responses/errors";
 import { FindMyInterface } from "@server/api/interfaces/findMyInterface";
 
+/** `?force=true`: relaunch Find My even within the cooldown (the client's refresh button). */
+const isForced = (ctx: RouterContext): boolean => ctx.request.query?.force === "true";
+
+/**
+ * Refresh answers carry `metadata.collecting`: whether Find My is relaunched and new locations
+ * will follow over the socket. False within the cooldown, so clients show no spinners.
+ */
 export class FindMyRouter {
     static async refreshDevices(ctx: RouterContext, _: Next) {
         try {
-            const locations = await FindMyInterface.refreshDevices();
+            const locations = await FindMyInterface.refreshDevices(isForced(ctx));
             return new Success(ctx, {
                 message: "Successfully refreshed Find My device locations!",
-                data: locations
+                data: locations,
+                metadata: { collecting: FindMyInterface.isCollecting }
             }).send();
         } catch (ex: any) {
             throw new ServerError({
@@ -22,10 +30,11 @@ export class FindMyRouter {
 
     static async refreshFriends(ctx: RouterContext, _: Next) {
         try {
-            const locations = await FindMyInterface.refreshFriends();
+            const locations = await FindMyInterface.refreshFriends(true, isForced(ctx));
             return new Success(ctx, {
                 message: "Successfully refreshed Find My friends locations!",
-                data: locations
+                data: locations,
+                metadata: { collecting: FindMyInterface.isCollecting }
             }).send();
         } catch (ex: any) {
             throw new ServerError({

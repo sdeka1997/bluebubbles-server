@@ -164,8 +164,8 @@ test("devices on 14.4+: a missing FMIP key returns null without starting a refre
     const backend = (fmipKey: Buffer | null, dir: string): EncryptedDevicesBackend => ({
         loadFmipKey: async () => fmipKey,
         findMyDir: dir,
-        startLiveRefresh: () => {
-            calls.push("start-live-refresh");
+        startLiveRefresh: force => {
+            calls.push(force ? "start-live-refresh-forced" : "start-live-refresh");
         },
         log: message => logs.push(message)
     });
@@ -179,5 +179,7 @@ test("devices on 14.4+: a missing FMIP key returns null without starting a refre
         assert.deepEqual(calls, []);
         assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir), true), [IPHONE]);
         assert.deepEqual(calls, ["start-live-refresh"], "a refresh answers at once; changes follow as Find My writes them");
+        assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir), true, true), [IPHONE]);
+        assert.deepEqual(calls, ["start-live-refresh", "start-live-refresh-forced"], "a forced refresh is passed on");
     });
 });

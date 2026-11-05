@@ -28,8 +28,11 @@ export type EncryptedFriendsBackend = {
     cache: Pick<FindMyFriendsCache, "setRoster" | "addAll" | "getAll">;
     /** Adds addresses for the response, within its time budget */
     label: (locations: FindMyLocationItem[]) => Promise<FindMyLocationItem[]>;
-    /** Starts (or joins) the live refresh that relaunches Find My and publishes its writes */
-    startLiveRefresh: () => void;
+    /**
+     * Starts (or joins) the live refresh that relaunches Find My and publishes its writes;
+     * `force` relaunches Find My even within the cooldown
+     */
+    startLiveRefresh: (force: boolean) => void;
     /** Labels, stores and emits the locations that changed (the new-findmy-location path) */
     publish: (locations: FindMyLocationItem[]) => Promise<void>;
     log: (message: string) => void;
@@ -69,7 +72,8 @@ export const readEncryptedFriends = async (backend: EncryptedFriendsBackend): Pr
  */
 export const refreshEncryptedFriends = async (
     backend: EncryptedFriendsBackend,
-    openFindMyApp = true
+    openFindMyApp = true,
+    force = false
 ): Promise<FindMyLocationItem[]> => {
     // Check the keys first: without them, relaunching Find My cannot produce anything we can read
     if (!backend.loadLocalStorageKey()) {
@@ -81,7 +85,7 @@ export const refreshEncryptedFriends = async (
         return backend.cache.getAll();
     }
 
-    if (openFindMyApp) backend.startLiveRefresh();
+    if (openFindMyApp) backend.startLiveRefresh(force);
     const current = await readEncryptedFriends(backend);
     if (current.length > 0) backend.cache.addAll(await backend.label(current));
     return backend.cache.getAll();
@@ -131,8 +135,8 @@ export type EncryptedDevicesBackend = {
     loadFmipKey: () => Promise<Buffer | null>;
     /** Directory holding the FMIP caches (FileSystem.findMyDir in production) */
     findMyDir: string;
-    /** Starts (or joins) the live refresh that relaunches Find My and publishes its writes */
-    startLiveRefresh: () => void;
+    /** As EncryptedFriendsBackend.startLiveRefresh */
+    startLiveRefresh: (force: boolean) => void;
     log: (message: string) => void;
 };
 
@@ -143,7 +147,8 @@ export type EncryptedDevicesBackend = {
  */
 export const getEncryptedDevices = async (
     backend: EncryptedDevicesBackend,
-    refresh = false
+    refresh = false,
+    force = false
 ): Promise<FindMyDevice[] | null> => {
     const fmipKey = await backend.loadFmipKey();
     if (!fmipKey) {
@@ -151,7 +156,7 @@ export const getEncryptedDevices = async (
         return null;
     }
 
-    if (refresh) backend.startLiveRefresh();
+    if (refresh) backend.startLiveRefresh(force);
     return readEncryptedDevices(fmipKey, backend.findMyDir, (file, error) =>
         backend.log(`Failed to read Find My ${file}: ${error}`)
     );

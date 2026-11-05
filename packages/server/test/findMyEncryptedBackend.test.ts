@@ -54,8 +54,8 @@ const fakeBackend = (overrides: Partial<EncryptedFriendsBackend> = {}) => {
         },
         cache,
         label: async items => items.map(item => ({ ...item, short_address: "Dallas, TX", long_address: "Dallas, TX" })),
-        startLiveRefresh: () => {
-            calls.push("start-live-refresh");
+        startLiveRefresh: force => {
+            calls.push(force ? "start-live-refresh-forced" : "start-live-refresh");
         },
         // Mirrors PrivateApiFindMyEventHandler.handleNewLocation: store, then emit only what changed
         publish: async items => {
@@ -111,6 +111,14 @@ test("starts a live Find My refresh, then returns freshly decrypted, labelled fr
     const mom = result.find(item => item.title === "Mom");
     assert.ok(mom, "Mom is listed");
     assert.deepEqual(mom.coordinates, [0, 0]);
+});
+
+test("a forced friends refresh asks the live refresh to relaunch Find My regardless of the cooldown", async () => {
+    const { backend, calls } = fakeBackend();
+
+    await refreshEncryptedFriends(backend, true, true);
+
+    assert.deepEqual(calls, ["start-live-refresh-forced", "read-roster", "read-locations"]);
 });
 
 test("a later read publishes only the friends whose location changed", async () => {
