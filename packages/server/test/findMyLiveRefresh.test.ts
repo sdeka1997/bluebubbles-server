@@ -336,6 +336,22 @@ test("reporting an already-open viewer again does not start another round", asyn
     assert.equal(refresh.round.collecting, false);
 });
 
+test("reopening while Find My is stopping serializes the stop before the new start", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
+    world.calls.length = 0;
+
+    refresh.setViewer("pixel", false);
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+
+    assert.equal(world.calls.filter(call => call === "quit").length, 1, "one coordinator owns the stop");
+    assert.equal(world.launches(), 1);
+    assert.equal(world.isRunning(), true);
+});
+
 test("a forced refresh during a round relaunches Find My and starts a new round", async () => {
     const world = fakeWorld();
     const refresh = new FindMyLiveRefresh(world.io);

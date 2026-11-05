@@ -113,6 +113,7 @@ export class FindMyLiveRefresh {
     private seenFixes = new Map<string, number>();
     private readonly viewers = new Set<string>();
     private cancelCheck: (() => void) | null = null;
+    private processTransition: Promise<void> = Promise.resolve();
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
@@ -165,9 +166,11 @@ export class FindMyLiveRefresh {
         this.devices.baseline();
 
         try {
-            if ((await this.io.isFindMyRunning()) && !(await this.quit())) throw new Error("Find My did not quit");
-            await this.io.launchFindMyHidden();
-            if (!(await this.waitUntil(this.io.isFindMyReady, true))) throw new Error("Find My did not start");
+            await this.runProcessTransition(async () => {
+                if ((await this.io.isFindMyRunning()) && !(await this.quit())) throw new Error("Find My did not quit");
+                await this.io.launchFindMyHidden();
+                if (!(await this.waitUntil(this.io.isFindMyReady, true))) throw new Error("Find My did not start");
+            });
         } catch (error) {
             this.io.log(`Find My refresh: ${error instanceof Error ? error.message : error}`);
             this.active = false;
@@ -248,6 +251,15 @@ export class FindMyLiveRefresh {
         return this.waitUntil(this.io.isFindMyRunning, false);
     }
 
+    private runProcessTransition<T>(operation: () => Promise<T>): Promise<T> {
+        const result = this.processTransition.then(operation);
+        this.processTransition = result.then(
+            () => undefined,
+            () => undefined
+        );
+        return result;
+    }
+
     private waitUntil(state: () => Promise<boolean>, wanted: boolean): Promise<boolean> {
         const deadline = this.io.now() + STEP_LIMIT_MS;
         return new Promise(resolve => {
@@ -276,6 +288,6 @@ export class FindMyLiveRefresh {
         this.cancelCheck?.();
         this.cancelCheck = null;
         this.io.log("Find My refresh: round over and no Find My screen is open; quitting Find My");
-        void this.quit();
+        void this.runProcessTransition(() => this.quit());
     }
 }
