@@ -42,6 +42,13 @@ export const findMyLiveLaunchArguments = (environment: Record<string, string>): 
 /** The socket is not there: Find My has not loaded the bridge yet, or has gone, so nothing was sent. */
 const NOT_LISTENING = new Set(["ENOENT"]);
 
+/**
+ * The connection broke mid-request (seen live as EPIPE on the first start after launch, while Find
+ * My's main thread was busy). The bridge may still have read the command, so who is followed is in
+ * doubt until a later command is answered, as with a timeout; Find My itself is fine.
+ */
+const BROKEN_MID_REQUEST = new Set(["EPIPE", "ECONNRESET"]);
+
 /** Whether anything accepts a connection on the socket. Sends nothing, so needs no token. */
 export const isFindMyLiveBridgeListening = (socketPath: string): Promise<boolean> =>
     new Promise(resolve => {
@@ -160,6 +167,7 @@ export class FindMyLiveBridgeHost {
             // Refused: the bridge's backlog is full while Find My's main thread is busy (a leftover
             // socket file with no Find My also refuses, but then Find My is gone and the check relaunches)
             if (error?.code === "ECONNREFUSED") throw new FindMyBridgeBusy(String(error?.message ?? error));
+            if (BROKEN_MID_REQUEST.has(error?.code)) throw new FindMyBridgeBusy(String(error?.message ?? error));
             throw error;
         }
         if (reply.status === "error" && reply.error === "Find My is not ready") throw new FindMyBridgeNotReady();

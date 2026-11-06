@@ -334,3 +334,20 @@ test("a refused connection means Find My is busy: what it was sent before may st
         });
     }
 });
+
+test("a connection broken mid-request means Find My is busy, not broken: the next check sends it again", async () => {
+    // Seen live: an EPIPE on the first start after launch, which used to relaunch Find My (~12 s lost)
+    for (const code of ["EPIPE", "ECONNRESET"]) {
+        for (const send of [(host: FindMyLiveBridgeHost) => host.start("friend"), (host: FindMyLiveBridgeHost) => host.stop()]) {
+            const world = fakeIo();
+            const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+            world.replies.push(Object.assign(new Error(`write ${code}`), { code }));
+
+            await host.launch();
+            await assert.rejects(send(host), (error: unknown) => {
+                assert.ok(error instanceof FindMyBridgeBusy, `${code} should count as busy`);
+                return true;
+            });
+        }
+    }
+});

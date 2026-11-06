@@ -53,6 +53,8 @@ const fakeWorld = (
     let refusals = options.refusesQuits ?? 0;
     let neverStarts = options.neverStarts ?? false;
     let commandFailures = 0;
+    /** Commands whose connection breaks mid-request (EPIPE), which the host reports as busy */
+    let brokenCommands = 0;
     let lookupFailures = 0;
     let startRejection: string | null = null;
     let neverReady = options.neverReady ?? false;
@@ -170,6 +172,11 @@ const fakeWorld = (
                 throw new FindMyBridgeNotReady();
             }
             whileBusy(`follow:${friendId}`, () => (appleFollows = friendId));
+            if (brokenCommands > 0) {
+                brokenCommands--;
+                calls.push(`broken:follow:${friendId}`);
+                throw new FindMyBridgeBusy("write EPIPE");
+            }
             if (timesOut(`follow:${friendId}`, () => running && (appleFollows = friendId))) {
                 throw new FindMyBridgeTimedOut();
             }
@@ -288,6 +295,7 @@ const fakeWorld = (
         lookups: () => calls.filter(call => call.startsWith("lookup:")).length,
         published: () => calls.filter(call => call.startsWith("publish")),
         failNextCommand: () => commandFailures++,
+        breakNextCommand: () => brokenCommands++,
         failLookups: (count = 1000) => (lookupFailures = count),
         rejectStarts: (reason: string | null) => (startRejection = reason),
         addToRoster: (handle: string, friendId: string) => roster.set(handle, friendId),
@@ -1123,4 +1131,15 @@ test("a Find My kept after the map closed is not kept once it can no longer foll
     await world.advance(3000);
 
     assert.equal(world.isRunning(), false, "a stop that failed leaves the follow in doubt, so it is quit");
+});
+
+test("a start that breaks mid-request right after launch is sent again, without relaunching Find My", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    world.breakNextCommand();
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(5000);
+
+    assert.equal(world.launches(), 1, "Find My is fine; the connection only broke");
+    assert.equal(world.appleFollows(), "friend-mom");
 });
