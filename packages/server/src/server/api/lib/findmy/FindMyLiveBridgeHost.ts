@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import { FindMyBridgeNotReady, FindMyBridgeTimedOut, FindMyLiveRejected } from "./FindMyMirror";
+import { FindMyBridgeBusy, FindMyBridgeNotReady, FindMyBridgeTimedOut, FindMyLiveRejected } from "./FindMyMirror";
 
 export type FindMyLiveBridgeRequest = {
     token: string;
@@ -39,8 +39,8 @@ export const findMyLiveLaunchArguments = (environment: Record<string, string>): 
     "FindMy"
 ];
 
-/** Socket errors meaning nothing listens there yet: Find My has not loaded the bridge yet, or has gone. */
-const NOT_LISTENING = new Set(["ENOENT", "ECONNREFUSED"]);
+/** The socket is not there: Find My has not loaded the bridge yet, or has gone, so nothing was sent. */
+const NOT_LISTENING = new Set(["ENOENT"]);
 
 /** Whether anything accepts a connection on the socket. Sends nothing, so needs no token. */
 export const isFindMyLiveBridgeListening = (socketPath: string): Promise<boolean> =>
@@ -157,6 +157,9 @@ export class FindMyLiveBridgeHost {
         } catch (error: any) {
             // Not loaded yet: never sent, so the next check asks again. A timeout is passed on: it may still run
             if (NOT_LISTENING.has(error?.code)) throw new FindMyBridgeNotReady();
+            // Refused: the bridge's backlog is full while Find My's main thread is busy (a leftover
+            // socket file with no Find My also refuses, but then Find My is gone and the check relaunches)
+            if (error?.code === "ECONNREFUSED") throw new FindMyBridgeBusy(String(error?.message ?? error));
             throw error;
         }
         if (reply.status === "error" && reply.error === "Find My is not ready") throw new FindMyBridgeNotReady();

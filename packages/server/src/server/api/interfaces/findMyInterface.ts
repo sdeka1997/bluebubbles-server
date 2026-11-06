@@ -130,9 +130,16 @@ export class FindMyInterface {
         this.mirror = new FindMyMirror({
             isFindMyRunning: () => this.isFindMyRunning(),
             isFindMyReady: () => this.isFindMyReady(),
-            quitFindMy: async () => {
-                await FileSystem.executeAppleScript(quitFindMyFriends());
-            },
+            // Bounded, so a Find My too busy to answer cannot hold up the check for AppleScript's ~2 min
+            quitFindMy: () =>
+                new Promise<void>((resolve, reject) => {
+                    child_process.execFile(
+                        "/usr/bin/osascript",
+                        ["-e", 'tell application "FindMy" to quit'],
+                        { timeout: 5000 },
+                        error => (error ? reject(error) : resolve())
+                    );
+                }),
             // Only Find My itself, by its exact process name; it opens again on the next launch
             forceQuitFindMy: () =>
                 new Promise<void>((resolve, reject) => {
@@ -144,6 +151,13 @@ export class FindMyInterface {
             launchFindMyHidden: () => this.getLiveBridge().launch(),
             // Only a Find My launched with the bridge listens on its socket; a leftover socket file does not
             isOurFindMyRunning: () => this.getLiveBridge().isOurs(),
+            findMyPid: () =>
+                new Promise(resolve => {
+                    child_process.execFile("/usr/bin/pgrep", ["-x", "FindMy"], (error, stdout) => {
+                        const pids = error ? [] : String(stdout).trim().split(/\s+/).map(Number).filter(Boolean);
+                        resolve(pids.length === 1 ? pids[0] : null);
+                    });
+                }),
             forgetLaunch: () => this.getLiveBridge().reset(),
             friendIdFor: handle => this.friendIdForHandle(handle),
             startLiveTracking: friendId => this.getLiveBridge().start(friendId),

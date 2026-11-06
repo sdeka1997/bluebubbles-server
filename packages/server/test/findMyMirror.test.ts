@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+    FindMyBridgeBusy,
     FindMyBridgeNotReady,
     FindMyBridgeTimedOut,
     FindMyLiveRejected,
@@ -79,6 +80,23 @@ const fakeWorld = (
         queued.push(run);
         return true;
     };
+    /** Find My's process id; each launch, or opening by hand, starts a new one */
+    let pid = running ? 1 : 0;
+    let nextPid = 2;
+    /** While Find My's main thread is busy, commands wait: one served plus a listen backlog of 4, then refused */
+    const BUSY_BACKLOG = 5;
+    let busyUntil = 0;
+    let busyQueue: (() => void)[] = [];
+    const whileBusy = (command: string, run: () => void) => {
+        if (!(running && now < busyUntil)) return;
+        if (busyQueue.length >= BUSY_BACKLOG) {
+            calls.push(`refused:${command}`);
+            throw new FindMyBridgeBusy("connect ECONNREFUSED");
+        }
+        calls.push(`timeout:${command}`);
+        busyQueue.push(run);
+        throw new FindMyBridgeTimedOut();
+    };
     let releaseCommand: (() => void) | null = null;
     let blockCommands = false;
     let releasePublish: (() => void) | null = null;
@@ -95,6 +113,8 @@ const fakeWorld = (
         },
         quitFindMy: async () => {
             calls.push("quit");
+            // A busy main thread does not answer the quit Apple event
+            if (now < busyUntil) throw new Error("AppleEvent timed out. (-1712)");
             // Find My refuses to quit while it is still starting (osascript -128 "User canceled")
             if (!ready) throw new Error("User canceled. (-128)");
             if (refusals > 0) {
@@ -106,6 +126,8 @@ const fakeWorld = (
                 ready = false;
                 withBridge = false;
                 upAt = null;
+                busyUntil = 0;
+                busyQueue = [];
             }, 200);
         },
         launchFindMyHidden: async () => {
@@ -114,6 +136,7 @@ const fakeWorld = (
             io.schedule(() => {
                 running = true;
                 withBridge = true;
+                pid = nextPid++;
             }, 300);
             if (!neverReady) {
                 io.schedule(() => {
@@ -129,8 +152,12 @@ const fakeWorld = (
             ready = false;
             withBridge = false;
             upAt = null;
+            busyUntil = 0;
+            busyQueue = [];
         },
-        isOurFindMyRunning: async () => running && withBridge,
+        // A full backlog refuses the connection, as nothing listening does
+        isOurFindMyRunning: async () => running && withBridge && !(now < busyUntil && busyQueue.length >= BUSY_BACKLOG),
+        findMyPid: async () => (running ? pid : null),
         forgetLaunch: () => calls.push("forget"),
         startLiveTracking: async friendId => {
             if (running && !withBridge) {
@@ -142,6 +169,7 @@ const fakeWorld = (
                 calls.push("bridge-not-ready");
                 throw new FindMyBridgeNotReady();
             }
+            whileBusy(`follow:${friendId}`, () => (appleFollows = friendId));
             if (timesOut(`follow:${friendId}`, () => running && (appleFollows = friendId))) {
                 throw new FindMyBridgeTimedOut();
             }
@@ -155,6 +183,7 @@ const fakeWorld = (
             }
         },
         stopLiveTracking: async () => {
+            whileBusy("unfollow", () => (appleFollows = null));
             if (timesOut("unfollow", () => (appleFollows = null))) throw new FindMyBridgeTimedOut();
             calls.push("unfollow");
             appleFollows = null;
@@ -225,14 +254,28 @@ const fakeWorld = (
             running = true;
             ready = true;
             withBridge = false;
+            pid = nextPid++;
         },
         /** Who Apple is following in the running Find My */
         appleFollows: () => (running ? appleFollows : null),
         timeOutCommands: (count: number) => (commandTimeouts = count),
+        /** Find My's main thread is busy for a while: commands wait, time out for the client, then run in order */
+        busyFor: (ms: number) => {
+            busyUntil = now + ms;
+            const busyPid = pid;
+            if (Number.isFinite(ms)) {
+                io.schedule(() => {
+                    const pending = busyQueue;
+                    busyQueue = [];
+                    if (running && pid === busyPid) pending.forEach(fn => fn());
+                }, ms);
+            }
+        },
         /** The user quits our Find My and opens their own between two checks */
         swapForOwn: () => {
             withBridge = false;
             upAt = null;
+            pid = nextPid++;
         },
         /** Find My quit by hand on the Mac */
         quitByHand: () => {
@@ -935,4 +978,65 @@ test("the user's own Find My opened just after ours quit is not asked to quit", 
 
     assert.equal(world.quits(), 1);
     assert.equal(world.isRunning(), true);
+});
+
+test("a stop refused while Find My is busy is sent again until Find My answers", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+    await world.advance(3000);
+
+    world.busyFor(15_000);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(8000);
+    assert.ok(world.calls.some(call => call.startsWith("refused:")), "the backlog filled");
+    mirror.setViewer("pixel", true);
+    await world.advance(20_000);
+
+    assert.equal(world.appleFollows(), null);
+});
+
+test("a busy Find My of ours is still quit when the last map closes", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(3000);
+
+    world.busyFor(Number.POSITIVE_INFINITY);
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(8000);
+    mirror.setViewer("pixel", false);
+    await world.advance(30_000);
+
+    assert.equal(world.isRunning(), false);
+    assert.equal(world.appleFollows(), null);
+});
+
+test("one slow answer late in a launch does not stop later selections from being followed", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(300_000);
+
+    world.busyFor(2500);
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(1000);
+    mirror.setViewer("pixel", true, "carol@example.com");
+    await world.advance(10_000);
+
+    assert.equal(world.appleFollows(), "friend-carol");
+});
+
+test("a Find My busy for good with a follow in doubt is relaunched, and the selection followed again", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(3000);
+
+    world.busyFor(Number.POSITIVE_INFINITY);
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(90_000);
+
+    assert.equal(world.launches(), 2);
+    assert.equal(world.appleFollows(), "friend-dad");
 });

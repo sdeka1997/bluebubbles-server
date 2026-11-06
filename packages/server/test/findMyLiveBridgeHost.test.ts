@@ -13,7 +13,12 @@ import {
     FindMyLiveBridgeRequest,
     requestFindMyLiveBridge
 } from "../src/server/api/lib/findmy/FindMyLiveBridgeHost";
-import { FindMyBridgeNotReady, FindMyBridgeTimedOut, FindMyLiveRejected } from "../src/server/api/lib/findmy/FindMyMirror";
+import {
+    FindMyBridgeBusy,
+    FindMyBridgeNotReady,
+    FindMyBridgeTimedOut,
+    FindMyLiveRejected
+} from "../src/server/api/lib/findmy/FindMyMirror";
 
 const fakeIo = () => {
     const removed: string[] = [];
@@ -248,8 +253,7 @@ test("launches one token-authenticated host and starts the opaque Apple friend i
 test("a bridge not ready yet, or not listening yet, says so without waiting", async () => {
     for (const reply of [
         { status: "error" as const, error: "Find My is not ready" },
-        Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }),
-        Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })
+        Object.assign(new Error("connect ENOENT"), { code: "ENOENT" })
     ]) {
         const world = fakeIo();
         const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
@@ -312,5 +316,21 @@ test("only a socket something listens on counts as our Find My", async () => {
         assert.equal(await isFindMyLiveBridgeListening(socketPath), false, "a leftover socket file");
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("a refused connection means Find My is busy: what it was sent before may still run", async () => {
+    // The bridge's listen backlog is full while Find My's main thread is busy
+    for (const send of [(host: FindMyLiveBridgeHost) => host.start("friend"), (host: FindMyLiveBridgeHost) => host.stop()]) {
+        const world = fakeIo();
+        const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+        world.replies.push(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+
+        await host.launch();
+        await assert.rejects(send(host), (error: unknown) => {
+            assert.ok(error instanceof FindMyBridgeBusy);
+            assert.ok(!(error instanceof FindMyBridgeNotReady));
+            return true;
+        });
     }
 });
