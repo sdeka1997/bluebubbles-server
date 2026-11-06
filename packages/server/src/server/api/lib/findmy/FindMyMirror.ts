@@ -61,7 +61,7 @@ export class FindMyBridgeTimedOut extends FindMyBridgeBusy {
     }
 }
 
-/** How long after Find My is up its bridge may stay not ready (it looks for Find My's manager once, 15 s in) */
+/** How long after Find My is up its bridge may stay not ready (it looks for Find My's manager every second) */
 const BRIDGE_READY_LIMIT_MS = 30_000;
 
 /** How often the mirror compares Find My with the open maps, and checks its files for a new write. */
@@ -87,6 +87,13 @@ const RETRY_REFUSED_MS = 30 * 1000;
 
 /** How long a Find My asked to quit is given to go before it is asked again. It takes ~0.2 s. */
 const QUIT_WAIT_MS = 2000;
+
+/**
+ * How long Find My is kept after the last map closes, so a map reopened soon after (or a connection
+ * that drops and comes back) carries on with it instead of waiting for a fresh launch. Nobody is
+ * followed meanwhile. Short, as a hidden Find My stops fetching a few minutes after it opens.
+ */
+const KEEP_AFTER_CLOSE_MS = 60 * 1000;
 
 /** Longest phone number or email Apple accepts is well under this; anything longer is not a handle. */
 const HANDLE_LIMIT = 320;
@@ -150,7 +157,8 @@ class Publisher {
  * Find My on this Mac, mirrored to the clients' maps, as Find My itself behaves: while a map is
  * open Find My runs (launched hidden for that opening, so Apple fetches everyone afresh), every
  * location it writes is published as it lands, and the person selected on the map is followed
- * live, as clicking them does. Once no map is open Find My is quit, which also ends any follow.
+ * live, as clicking them does. Once no map is open the follow stops; Find My is kept a minute for
+ * a map that opens again soon, then quit.
  *
  * Clients only say what they show. One check, every second, makes Find My match it, so a step
  * that fails is simply tried again on the next check; there is no recovery path of its own.
@@ -158,8 +166,11 @@ class Publisher {
 export class FindMyMirror {
     /** Open maps and who each has selected, the most recently changed last */
     private readonly viewers = new Map<string, string | null>();
-    /** Bumped each time a map opens with none open before; each opening gets its own Find My */
+    /** Bumped each time a map opens with none open in the last minute; each opening gets its own Find My */
     private opening = 0;
+    /** When the last map closed, while none is open */
+    private closedAt: number | null = null;
+    private readonly keepAfterCloseMs: number;
 
     /** Whether the running Find My is one this server launched, and so may quit */
     private ours = false;
@@ -195,7 +206,8 @@ export class FindMyMirror {
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
-    constructor(private readonly io: FindMyMirrorIo) {
+    constructor(private readonly io: FindMyMirrorIo, options: { keepAfterCloseMs?: number } = {}) {
+        this.keepAfterCloseMs = options.keepAfterCloseMs ?? KEEP_AFTER_CLOSE_MS;
         const onError = (error: unknown) => io.log(`Find My: failed to publish an update: ${error}`);
         this.friends = new Publisher(io.friendFiles, io.stat, io.publishFriends, onError);
         this.devices = new Publisher(io.deviceFiles, io.stat, io.publishDevices, onError);
@@ -212,7 +224,12 @@ export class FindMyMirror {
         const wasOpen = this.isOpen;
         this.viewers.delete(id);
         if (open) this.viewers.set(id, handle);
-        if (!wasOpen && this.isOpen) this.opening++;
+        if (wasOpen && !this.isOpen) this.closedAt = this.io.now();
+        if (!wasOpen && this.isOpen) {
+            // Back within the minute: carry on with the Find My kept for it
+            if (!this.kept()) this.opening++;
+            this.closedAt = null;
+        }
         this.check();
     }
 
@@ -272,6 +289,19 @@ export class FindMyMirror {
             if (!this.isOpen) return false;
             await this.launch();
             return true;
+        }
+
+        if (!this.isOpen && this.ours && this.kept() && this.launchedFor === this.opening) {
+            // Kept for a map that opens again soon, following nobody meanwhile
+            await this.follow(null);
+            // A stop that failed leaves the follow in doubt, so it is let go below instead
+            if (this.launchedFor === this.opening) {
+                if (this.up) {
+                    this.friends.check();
+                    this.devices.check();
+                }
+                return true;
+            }
         }
 
         if (!this.isOpen) {
@@ -439,6 +469,11 @@ export class FindMyMirror {
             this.log(`Find My: live location command failed; relaunching it: ${error}`);
             this.launchedFor = null;
         }
+    }
+
+    /** Whether the last map closed less than a minute ago. */
+    private kept(): boolean {
+        return this.closedAt !== null && this.io.now() - this.closedAt < this.keepAfterCloseMs;
     }
 
     /** Whether the running Find My is our launch: the pid seen with our bridge listening, once known. */

@@ -30,4 +30,9 @@ codesign -s - -f "$BUILD/libBlueBubblesFindMyLive.dylib" "$BUILD/BlueBubblesFind
 xcrun swiftc -target x86_64-apple-macosx15.0 -I "$BUILD" -L "$BUILD" \
   -lFMFCore "$BUILD/BlueBubblesFindMyBridge.dylib" -Xlinker -rpath -Xlinker @executable_path \
   "$ROOT/test/host.swift" -o "$BUILD/host"
+# Second host: no test setter; its manager appears 0.5 s in and the bridge must find it itself.
+xcrun swiftc -target x86_64-apple-macosx15.0 -I "$BUILD" -L "$BUILD" \
+  -lFMFCore "$BUILD/BlueBubblesFindMyBridge.dylib" -Xlinker -rpath -Xlinker @executable_path \
+  "$ROOT/test/host_scan.swift" -o "$BUILD/host_scan"
 python3 "$ROOT/test/test_bridge.py"
+python3 "$ROOT/test/test_scan.py"

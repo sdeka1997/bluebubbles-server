@@ -43,6 +43,7 @@ static void recordManager(task_t task, void *context, unsigned type, vm_range_t 
 }
 
 static void findManager(void) {
+    if (managerObject) return;
     managerClass = NSClassFromString(@"FMFCore.FMFManager");
     if (!managerClass || !startLive || !stopLive) return;
     vm_address_t *zones = NULL;
@@ -55,7 +56,7 @@ static void findManager(void) {
                                         (vm_address_t)zone, reader, recordManager);
         }
     }
-    os_log_info(logHandle, "manager scan count=%u ready=%{public}s", managersFound, managerObject ? "yes" : "no");
+    if (managerObject) os_log_info(logHandle, "manager scan count=%u ready=yes", managersFound);
 }
 
 static NSData *response(NSString *status, NSString *error) {
@@ -117,6 +118,8 @@ static void serveClient(int client) {
     } else {
         __block NSData *commandReply;
         dispatch_sync(dispatch_get_main_queue(), ^{
+            // A tap can come before the next look; look now
+            findManager();
             if (!managerObject) {
                 commandReply = response(@"error", @"Find My is not ready");
             } else if ([request[@"command"] isEqual:@"start"] && [request[@"id"] isKindOfClass:NSString.class]) {
@@ -164,6 +167,13 @@ static void listenForCommands(void) {
     }
 }
 
+/// Looks for Find My's manager every second from load until found; it appears early in the launch.
+static void lookForManager(unsigned attempt) {
+    findManager();
+    if (managerObject || attempt >= 120) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ lookForManager(attempt + 1); });
+}
+
 #ifdef BBFM_TEST
 void bbfm_set_test_manager(void *pointer) {
     managerObject = pointer ? (__bridge id)pointer : nil;
@@ -182,8 +192,8 @@ __attribute__((constructor)) static void loadBridge(void) {
         if (token.length < 32 || socketPath.length == 0) return;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ listenForCommands(); });
         long delayMs = [environment[@"BBFM_LIVE_SCAN_DELAY_MS"] longLongValue];
-        if (delayMs <= 0) delayMs = 15000;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delayMs * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ findManager(); });
+        if (delayMs <= 0) delayMs = 1000;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delayMs * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{ lookForManager(0); });
     }
 }
 

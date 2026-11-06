@@ -37,7 +37,10 @@ retained-manager lifetime, start, switch, idempotent stop, unsupported commands
 and cleanup.
 No Apple process or data is involved.
 
-The production bridge finds Find My's one `FMFManager` in its process. That
-scan and Apple's typed start/stop calls were separately proven in a reversible
-Find My injection test; the fake host supplies its manager through a symbol
-compiled only under `BBFM_TEST`.
+The production bridge finds Find My's one `FMFManager` in its process. It looks
+every second from load until found (it appears about a second into Find My's
+launch), and again when a command arrives, so live location can start within
+seconds of Find My opening. That scan and Apple's typed start/stop calls were
+separately proven in a reversible Find My injection test; the protocol test's
+host supplies its manager through a symbol compiled only under `BBFM_TEST`,
+and `test_scan.py` checks that the bridge finds a manager by itself.
