@@ -43,6 +43,7 @@ import { HandleSerializer } from "@server/api/serializers/HandleSerializer";
 import { AttachmentSerializer } from "@server/api/serializers/AttachmentSerializer";
 import { MacOsInterface } from "@server/api/interfaces/macosInterface";
 import { FindMyInterface } from "@server/api/interfaces/findMyInterface";
+import { findMyScreenHandle } from "@server/api/lib/findmy/FindMyMirror";
 import { getLogger } from "@server/lib/logging/Loggable";
 import { ProxyServices } from "@server/databases/server/constants";
 
@@ -1067,11 +1068,13 @@ export class SocketRoutes {
         });
 
         /**
-         * The client's Find My map opened or closed. Find My on this Mac runs while one is
-         * open, publishing new locations as it writes them, and quits as soon as the last one closes.
+         * What the client's Find My map shows: whether it is open, and the phone/email of the person
+         * selected on it (null for nobody). Find My on this Mac runs while one is open, publishing new
+         * locations as it writes them and following the selected person live, and quits as soon as
+         * the last one closes.
          */
         socket.on("findmy-screen", (params, cb): void => {
-            FindMyInterface.setFindMyViewer(socket.id, params?.open === true);
+            FindMyInterface.setFindMyViewer(socket.id, params?.open === true, findMyScreenHandle(params));
             return response(cb, "findmy-screen", createSuccessResponse(null, "Find My screen state recorded"));
         });
 

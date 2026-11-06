@@ -138,11 +138,6 @@ export class HttpRoutes {
                         method: HttpMethod.POST,
                         path: "findmy/friends/refresh",
                         controller: FindMyRouter.refreshFriends
-                    },
-                    {
-                        method: HttpMethod.POST,
-                        path: "findmy/friends/live",
-                        controller: FindMyRouter.liveTracking
                     }
                 ]
             },

@@ -10,6 +10,12 @@ export type FindMyMirrorIo = {
     quitFindMy: () => Promise<void>;
     /** Launches Find My without showing it, with the local live-location bridge loaded */
     launchFindMyHidden: () => Promise<void>;
+    /** Whether a Find My launched by an earlier run of the server may still be running */
+    launchedEarlier: () => boolean;
+    /** Our launch of Find My is gone; drop what belonged to it (the bridge's token and socket) */
+    forgetLaunch: () => void;
+    /** Apple's id for the friend a client names by phone/email, or null when Find My has no such friend */
+    friendIdFor: (handle: string) => Promise<string | null>;
     /** Starts/stops Apple's live session for one friend inside the running Find My */
     startLiveTracking: (friendId: string) => Promise<void>;
     stopLiveTracking: () => Promise<void>;
@@ -28,17 +34,27 @@ export type FindMyMirrorIo = {
     log: (message: string) => void;
 };
 
-/** How often Find My's files are checked for a new write. Each check is a few stat() calls. */
+/** How often the mirror compares Find My with the open maps, and checks its files for a new write. */
 const CHECK_MS = 1000;
 
-/** How often to look again while waiting for Find My to quit or to start. Each step takes ~0.1 s. */
-const STEP_CHECK_MS = 100;
+/** How often to make sure Find My is still running while nothing else has changed. Each check is an osascript. */
+const ALIVE_CHECK_MS = 5000;
 
-/** Only for a Find My that never quits or never starts: the steps themselves take ~0.1 s. */
-const STEP_LIMIT_MS = 20 * 1000;
+/** How long a launched Find My may take to start before it is launched again. It takes ~1 s. */
+const START_LIMIT_MS = 20 * 1000;
 
-/** How long to wait before asking a Find My that would not quit again. */
-const QUIT_RETRY_MS = 60 * 1000;
+/** How long a Find My asked to quit is given to go before it is asked again. It takes ~0.2 s. */
+const QUIT_WAIT_MS = 2000;
+
+/** Longest phone number or email Apple accepts is well under this; anything longer is not a handle. */
+const HANDLE_LIMIT = 320;
+
+/** The person a client's findmy-screen message selects, or null for nobody or anything unusable. */
+export const findMyScreenHandle = (params: unknown): string | null => {
+    const handle = (params as { handle?: unknown } | null)?.handle;
+    if (typeof handle !== "string" || handle.trim().length === 0 || handle.length > HANDLE_LIMIT) return null;
+    return handle;
+};
 
 const sameFile = (a: FileFingerprint | null, b: FileFingerprint | null): boolean =>
     a === b || (!!a && !!b && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ino === b.ino);
@@ -89,23 +105,38 @@ class Publisher {
 }
 
 /**
- * Find My on this Mac, mirrored to the clients' maps, as Find My itself behaves: opening a map
- * opens Find My (relaunched hidden, so Apple fetches everyone afresh) and every location it writes
- * is published as it lands; tapping a person follows them live, as clicking them does; closing
- * the last map quits Find My, which also ends any follow. There are no rounds: rows show each
- * person's last known location and its age, as Apple's app does.
+ * Find My on this Mac, mirrored to the clients' maps, as Find My itself behaves: while a map is
+ * open Find My runs (launched hidden for that opening, so Apple fetches everyone afresh), every
+ * location it writes is published as it lands, and the person selected on the map is followed
+ * live, as clicking them does. Once no map is open Find My is quit, which also ends any follow.
+ *
+ * Clients only say what they show. One check, every second, makes Find My match it, so a step
+ * that fails is simply tried again on the next check; there is no recovery path of its own.
  */
 export class FindMyMirror {
-    private readonly viewers = new Set<string>();
-    /** Whether Find My was launched for the open maps and is up, so taps can reach it */
+    /** Open maps and who each has selected, the most recently changed last */
+    private readonly viewers = new Map<string, string | null>();
+    /** Bumped each time a map opens with none open before; each opening gets its own Find My */
+    private opening = 0;
+
+    /** Whether the running Find My is one this server launched, and so may quit */
+    private ours: boolean;
+    /** The opening the running Find My was launched for; null when it must be relaunched */
+    private launchedFor: number | null = null;
+    private startingSince: number | null = null;
+    private quitAskedAt: number | null = null;
+    /** Whether Find My is up for the open maps: started, with its files being watched */
     private up = false;
-    /** Counts taps; a tap acts only while it is the latest one. */
-    private taps = 0;
-    /** Every launch, quit and bridge command runs here, one at a time, in order */
-    private queue: Promise<void> = Promise.resolve();
-    private cancelCheck: (() => void) | null = null;
-    /** A launch or close waiting to try again on a Find My that would not quit */
-    private cancelRetry: (() => void) | null = null;
+    private lastAliveCheck = 0;
+    /** Who Apple is following in the running Find My, as last confirmed */
+    private followed: string | null = null;
+    /** The last selection looked up, so each one is looked up once per launch */
+    private lookedUp: { handle: string; friendId: string | null } | null = null;
+
+    private stepping = false;
+    private changed = true;
+    private cancelNext: (() => void) | null = null;
+    private lastLog = "";
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
@@ -113,6 +144,9 @@ export class FindMyMirror {
         const onError = (error: unknown) => io.log(`Find My: failed to publish an update: ${error}`);
         this.friends = new Publisher(io.friendFiles, io.stat, io.publishFriends, onError);
         this.devices = new Publisher(io.deviceFiles, io.stat, io.publishDevices, onError);
+        // A Find My left by an earlier run is ours to quit, and never serves a map as it is
+        this.ours = io.launchedEarlier();
+        this.check();
     }
 
     /** Whether any client has a Find My map open. */
@@ -120,147 +154,158 @@ export class FindMyMirror {
         return this.viewers.size > 0;
     }
 
-    /** A client's Find My map opened or closed. The first open launches Find My; the last close quits it. */
-    setViewer(id: string, open: boolean): void {
+    /** A client's Find My map opened, closed, or selected someone else (a phone/email, or null for nobody). */
+    setViewer(id: string, open: boolean, handle: string | null = null): void {
         const wasOpen = this.isOpen;
-        if (open) this.viewers.add(id);
-        else this.viewers.delete(id);
-        if (!wasOpen && this.isOpen) void this.enqueue(() => this.launch());
-        if (wasOpen && !this.isOpen) void this.enqueue(() => this.close());
-    }
-
-    /**
-     * Follows one friend live, as clicking them in Find My does; another friend switches, null
-     * stops. Acts only on the Find My an open map is running and never launches one. Resolves
-     * true only when this friend is being followed and no later tap has replaced them. The
-     * friend may still be being looked up; the tap keeps its place in line meanwhile.
-     */
-    async follow(friend: string | null | Promise<string>): Promise<boolean> {
-        const tap = ++this.taps;
-        const isLatest = () => tap === this.taps;
-        const friendId = await friend;
-        return this.enqueue(async () => {
-            if (!isLatest() || !this.up) return false;
-            try {
-                if (friendId === null) await this.io.stopLiveTracking();
-                else await this.io.startLiveTracking(friendId);
-            } catch (error) {
-                // Apple may still be following someone; a fresh Find My follows nobody
-                this.io.log(`Find My: live location command failed, relaunching: ${error}`);
-                await this.launch();
-                return false;
-            }
-            return friendId !== null && isLatest();
-        });
-    }
-
-    private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-        const result = this.queue.then(operation);
-        this.queue = result.then(
-            () => undefined,
-            () => undefined
-        );
-        return result;
-    }
-
-    /** Relaunches Find My hidden for the open maps and publishes what it writes from then on. */
-    private async launch(): Promise<void> {
-        if (!this.isOpen) return;
-        this.stopWatching();
-        this.stopRetrying();
-        this.up = false;
-        if ((await this.io.isFindMyRunning()) && !(await this.quit())) {
-            // It could still be following someone; nothing reaches it until it is relaunched
-            this.io.log("Find My: did not quit, so it was not relaunched; trying again later");
-            this.retryLater(() => this.launch());
-            return;
-        }
-        // Writes from here on are new to the clients, which were just sent the current snapshot
-        this.friends.baseline();
-        this.devices.baseline();
-        await this.io.launchFindMyHidden();
-        if (!(await this.waitUntil(this.io.isFindMyReady, true))) {
-            this.io.log("Find My: did not start");
-            return;
-        }
-        if (!this.isOpen) return this.close();
-        this.up = true;
-        this.io.log("Find My: open for the map; publishing locations as it writes them");
+        this.viewers.delete(id);
+        if (open) this.viewers.set(id, handle);
+        if (!wasOpen && this.isOpen) this.opening++;
         this.check();
     }
 
-    /** Quits Find My once no map is open; that also ends Apple's live follow. */
-    private async close(): Promise<void> {
-        if (this.isOpen) return;
-        this.stopWatching();
-        this.stopRetrying();
-        this.up = false;
-        if (!(await this.io.isFindMyRunning())) return;
-        if (await this.quit()) {
-            this.io.log("Find My: map closed; quit Find My");
-            return;
-        }
-        // A Find My left running could still be following someone; keep trying while no map is open
-        this.io.log("Find My: did not quit; trying again later");
-        this.retryLater(() => this.close());
-    }
-
-    private retryLater(operation: () => Promise<void>): void {
-        this.cancelRetry = this.io.schedule(() => {
-            this.cancelRetry = null;
-            void this.enqueue(operation);
-        }, QUIT_RETRY_MS);
-    }
-
-    private stopRetrying(): void {
-        this.cancelRetry?.();
-        this.cancelRetry = null;
-    }
-
-    /**
-     * Quits Find My once it has finished starting, asking again while it refuses (it does while
-     * starting: osascript -128 "User canceled"). Resolves true once it is gone.
-     */
-    private async quit(): Promise<boolean> {
-        if (!(await this.waitUntil(this.io.isFindMyReady, true))) return false;
-        const deadline = this.io.now() + STEP_LIMIT_MS;
-        for (;;) {
-            try {
-                await this.io.quitFindMy();
-                break;
-            } catch (error) {
-                if (this.io.now() >= deadline) {
-                    this.io.log(`Find My: failed to quit: ${error}`);
-                    return false;
-                }
-                await new Promise<void>(resolve => this.io.schedule(resolve, STEP_CHECK_MS));
-            }
-        }
-        return this.waitUntil(this.io.isFindMyRunning, false);
-    }
-
-    private waitUntil(state: () => Promise<boolean>, wanted: boolean): Promise<boolean> {
-        const deadline = this.io.now() + STEP_LIMIT_MS;
-        return new Promise(resolve => {
-            const look = async () => {
-                if ((await state()) === wanted) return resolve(true);
-                if (this.io.now() >= deadline) return resolve(false);
-                this.io.schedule(() => void look(), STEP_CHECK_MS);
-            };
-            void look();
-        });
-    }
-
+    /** Runs a check now, or right after the one running. */
     private check(): void {
-        this.cancelCheck = null;
-        if (!this.up) return;
+        this.changed = true;
+        if (this.stepping) return;
+        this.cancelNext?.();
+        this.cancelNext = null;
+        this.stepping = true;
+        void (async () => {
+            let again = true;
+            try {
+                this.changed = false;
+                again = await this.step();
+            } catch (error) {
+                this.log(`Find My: check failed: ${error}`);
+            }
+            this.stepping = false;
+            if (this.changed) return this.check();
+            if (again) {
+                this.cancelNext = this.io.schedule(() => {
+                    this.cancelNext = null;
+                    this.check();
+                }, CHECK_MS);
+            }
+        })();
+    }
+
+    /** One step towards Find My matching the open maps. Resolves whether to check again. */
+    private async step(): Promise<boolean> {
+        const now = this.io.now();
+        const steady = this.up && !this.changed && now - this.lastAliveCheck < ALIVE_CHECK_MS;
+        const running = steady || (await this.io.isFindMyRunning());
+        if (!steady) this.lastAliveCheck = now;
+
+        if (!running) {
+            this.up = false;
+            this.quitAskedAt = null;
+            // Still starting: once it is up it is quit or used, as the maps then need
+            if (this.startingSince !== null && now - this.startingSince < START_LIMIT_MS) return true;
+            if (this.ours) this.io.forgetLaunch();
+            this.ours = false;
+            this.startingSince = null;
+            if (!this.isOpen) return false;
+            await this.launch();
+            return true;
+        }
+
+        if (!this.isOpen) {
+            // A Find My opened by hand is the user's own
+            this.up = false;
+            if (this.ours) await this.quit("no map is open");
+            return this.ours;
+        }
+
+        if (this.launchedFor !== this.opening) {
+            // Opened by hand, left by an earlier run, launched for an earlier opening, or in an unknown state
+            this.up = false;
+            await this.quit("relaunching it for the map");
+            return true;
+        }
+
+        if (!this.up) {
+            if (!(await this.io.isFindMyReady())) {
+                if (this.startingSince !== null && now - this.startingSince >= START_LIMIT_MS) {
+                    this.log("Find My: did not finish starting; relaunching it");
+                    this.launchedFor = null;
+                }
+                return true;
+            }
+            // Writes from here on are new to the clients, which read the current snapshot on opening
+            this.friends.baseline();
+            this.devices.baseline();
+            this.startingSince = null;
+            this.up = true;
+            this.log("Find My: open for the map; publishing locations as it writes them");
+        }
+
         this.friends.check();
         this.devices.check();
-        this.cancelCheck = this.io.schedule(() => this.check(), CHECK_MS);
+        await this.follow(await this.selectedFriendId());
+        return true;
     }
 
-    private stopWatching(): void {
-        this.cancelCheck?.();
-        this.cancelCheck = null;
+    private async launch(): Promise<void> {
+        this.lookedUp = null;
+        this.followed = null;
+        this.startingSince = this.io.now();
+        this.launchedFor = this.opening;
+        this.ours = true;
+        try {
+            await this.io.launchFindMyHidden();
+        } catch (error) {
+            this.log(`Find My: failed to launch: ${error}`);
+        }
+    }
+
+    /** Asks Find My to quit; a later check sees it gone. It refuses while starting (osascript -128). */
+    private async quit(reason: string): Promise<void> {
+        const now = this.io.now();
+        if (this.quitAskedAt !== null && now - this.quitAskedAt < QUIT_WAIT_MS) return;
+        if (!(await this.io.isFindMyReady())) return;
+        try {
+            await this.io.quitFindMy();
+            this.quitAskedAt = now;
+            this.log(`Find My: quitting it, as ${reason}`);
+        } catch (error) {
+            this.log(`Find My: failed to quit, trying again: ${error}`);
+        }
+    }
+
+    /** Apple's id for the person the most recently changed map has selected, or null. */
+    private async selectedFriendId(): Promise<string | null> {
+        const handle = [...this.viewers.values()].pop() ?? null;
+        if (handle === null) return null;
+        if (this.lookedUp?.handle !== handle) {
+            let friendId: string | null = null;
+            try {
+                friendId = await this.io.friendIdFor(handle);
+                if (friendId === null) this.log("Find My: the selected person is not in Find My's roster");
+            } catch (error) {
+                this.log(`Find My: could not look up the selected person: ${error}`);
+            }
+            this.lookedUp = { handle, friendId };
+        }
+        return this.lookedUp.friendId;
+    }
+
+    private async follow(friendId: string | null): Promise<void> {
+        if (friendId === this.followed) return;
+        try {
+            if (friendId === null) await this.io.stopLiveTracking();
+            else await this.io.startLiveTracking(friendId);
+            this.followed = friendId;
+        } catch (error) {
+            // Apple may still be following someone; a fresh Find My follows nobody
+            this.log(`Find My: live location command failed; relaunching it: ${error}`);
+            this.launchedFor = null;
+        }
+    }
+
+    /** Logs a message once, not on every check that repeats it. */
+    private log(message: string): void {
+        if (message === this.lastLog) return;
+        this.lastLog = message;
+        this.io.log(message);
     }
 }

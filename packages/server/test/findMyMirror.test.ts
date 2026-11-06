@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FindMyMirror, FindMyMirrorIo } from "../src/server/api/lib/findmy/FindMyMirror";
+import { FindMyMirror, FindMyMirrorIo, findMyScreenHandle } from "../src/server/api/lib/findmy/FindMyMirror";
 
 type Fingerprint = { size: number; mtimeMs: number; ino: number };
 
@@ -9,9 +9,22 @@ const settle = async () => {
     for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
 };
 
+/** Apple's ids for the friends these tests name by handle. */
+const roster = new Map([
+    ["mom@example.com", "friend-mom"],
+    ["dad@example.com", "friend-dad"],
+    ["carol@example.com", "friend-carol"]
+]);
+
 /** Find My, its files and a clock, all fake. `advance` runs due timers in order. */
 const fakeWorld = (
-    options: { running?: boolean; neverStarts?: boolean; readyAfterMs?: number; refusesQuits?: number } = {}
+    options: {
+        running?: boolean;
+        launchedEarlier?: boolean;
+        neverStarts?: boolean;
+        readyAfterMs?: number;
+        refusesQuits?: number;
+    } = {}
 ) => {
     const calls: string[] = [];
     const logs: string[] = [];
@@ -25,7 +38,9 @@ const fakeWorld = (
     let timers: { at: number; fn: () => void; id: number }[] = [];
     let nextId = 0;
     let refusals = options.refusesQuits ?? 0;
+    let neverStarts = options.neverStarts ?? false;
     let commandFailures = 0;
+    let lookupFails = false;
     let releaseCommand: (() => void) | null = null;
     let blockCommands = false;
     let releasePublish: (() => void) | null = null;
@@ -37,7 +52,11 @@ const fakeWorld = (
         quitFindMy: async () => {
             calls.push("quit");
             // Find My refuses to quit while it is still starting (osascript -128 "User canceled")
-            if (!ready || refusals-- > 0) throw new Error("User canceled. (-128)");
+            if (!ready) throw new Error("User canceled. (-128)");
+            if (refusals > 0) {
+                refusals--;
+                throw new Error("User canceled. (-128)");
+            }
             io.schedule(() => {
                 running = false;
                 ready = false;
@@ -45,10 +64,12 @@ const fakeWorld = (
         },
         launchFindMyHidden: async () => {
             calls.push("launch");
-            if (options.neverStarts) return;
+            if (neverStarts) return;
             io.schedule(() => (running = true), 300);
             io.schedule(() => (ready = true), 300 + (options.readyAfterMs ?? 0));
         },
+        launchedEarlier: () => options.launchedEarlier ?? false,
+        forgetLaunch: () => calls.push("forget"),
         startLiveTracking: async friendId => {
             calls.push(`follow:${friendId}`);
             if (blockCommands) await new Promise<void>(resolve => (releaseCommand = resolve));
@@ -63,6 +84,11 @@ const fakeWorld = (
                 commandFailures--;
                 throw new Error("bridge unavailable");
             }
+        },
+        friendIdFor: async handle => {
+            calls.push(`lookup:${handle}`);
+            if (lookupFails) throw new Error("The Find My FMF key is not imported");
+            return roster.get(handle) ?? null;
         },
         friendFiles: () => ["db"],
         deviceFiles: () => ["Devices.data"],
@@ -113,10 +139,25 @@ const fakeWorld = (
         advance,
         touch,
         isRunning: () => running,
+        /** Find My opened by hand on the Mac */
+        openByHand: () => {
+            running = true;
+            ready = true;
+        },
+        /** Find My quit by hand on the Mac */
+        quitByHand: () => {
+            running = false;
+            ready = false;
+        },
         launches: () => calls.filter(call => call === "launch").length,
+        quits: () => calls.filter(call => call === "quit").length,
         follows: () => calls.filter(call => call.startsWith("follow:") || call === "unfollow"),
+        lookups: () => calls.filter(call => call.startsWith("lookup:")).length,
+        published: () => calls.filter(call => call.startsWith("publish")),
         failNextCommand: () => commandFailures++,
+        failLookups: () => (lookupFails = true),
         refuseQuits: (count: number) => (refusals = count),
+        startWorking: () => (neverStarts = false),
         blockCommands: () => (blockCommands = true),
         releaseCommand: () => {
             blockCommands = false;
@@ -130,9 +171,11 @@ const fakeWorld = (
     };
 };
 
-const openMap = async (world: ReturnType<typeof fakeWorld>, mirror: FindMyMirror, id = "pixel") => {
-    mirror.setViewer(id, true);
-    await world.advance(1000);
+type World = ReturnType<typeof fakeWorld>;
+
+const openMap = async (world: World, mirror: FindMyMirror, id = "pixel", handle: string | null = null) => {
+    mirror.setViewer(id, true, handle);
+    await world.advance(2000);
 };
 
 test("opening the map launches Find My hidden and publishes each write as it lands", async () => {
@@ -142,13 +185,13 @@ test("opening the map launches Find My hidden and publishes each write as it lan
     await openMap(world, mirror);
     assert.equal(world.launches(), 1);
     assert.equal(mirror.isOpen, true);
-    assert.deepEqual(world.calls.filter(call => call.startsWith("publish")), [], "nothing new yet");
+    assert.deepEqual(world.published(), [], "nothing new yet");
 
     world.touch("db");
     await world.advance(1000);
     world.touch("Devices.data");
     await world.advance(1000);
-    assert.deepEqual(world.calls.filter(call => call.startsWith("publish")), ["publish-friends", "publish-devices"]);
+    assert.deepEqual(world.published(), ["publish-friends", "publish-devices"]);
 });
 
 test("opening the map relaunches a Find My that was already running, so Apple fetches afresh", async () => {
@@ -157,7 +200,10 @@ test("opening the map relaunches a Find My that was already running, so Apple fe
 
     await openMap(world, mirror);
 
-    assert.deepEqual(world.calls.slice(0, 2), ["quit", "launch"]);
+    assert.deepEqual(
+        world.calls.filter(call => call === "quit" || call === "launch"),
+        ["quit", "launch"]
+    );
     assert.equal(world.isRunning(), true);
 });
 
@@ -168,7 +214,7 @@ test("a second open map shares the running Find My", async () => {
 
     await openMap(world, mirror, "laptop");
     mirror.setViewer("pixel", true);
-    await world.advance(1000);
+    await world.advance(2000);
 
     assert.equal(world.launches(), 1);
 });
@@ -189,17 +235,19 @@ test("closing the last map quits Find My at once", async () => {
     assert.equal(mirror.isOpen, false);
 });
 
-test("nothing is published once the map has closed", async () => {
+test("nothing is published once the map has closed, and checking stops", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
     await openMap(world, mirror);
     mirror.setViewer("pixel", false);
-    await world.advance(1000);
+    await world.advance(2000);
+    const calls = world.calls.length;
 
     world.touch("db");
-    await world.advance(5000);
+    await world.advance(60_000);
 
-    assert.deepEqual(world.calls.filter(call => call.startsWith("publish")), []);
+    assert.deepEqual(world.published(), []);
+    assert.equal(world.calls.length, calls, "nothing left to do once Find My is gone");
 });
 
 test("closing the map while Find My is still starting quits it once it is up", async () => {
@@ -221,9 +269,12 @@ test("reopening while Find My is quitting waits for the quit, then launches agai
 
     mirror.setViewer("pixel", false);
     mirror.setViewer("pixel", true);
-    await world.advance(2000);
+    await world.advance(3000);
 
-    assert.deepEqual(world.calls.filter(call => call === "quit" || call === "launch"), ["launch", "quit", "launch"]);
+    assert.deepEqual(
+        world.calls.filter(call => call === "quit" || call === "launch"),
+        ["launch", "quit", "launch"]
+    );
     assert.equal(world.isRunning(), true);
 });
 
@@ -238,30 +289,54 @@ test("a Find My that refuses to quit is asked again until it does", async () => 
     assert.equal(world.isRunning(), false);
 });
 
-test("a Find My that never quits is tried again later while no map is open", async () => {
-    const world = fakeWorld({ refusesQuits: 1000 });
-    const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
-    mirror.setViewer("pixel", false);
-    await world.advance(30_000);
-    const quitsAfterFirstTry = world.calls.filter(call => call === "quit").length;
-
-    await world.advance(60_000);
-
-    assert.ok(world.calls.filter(call => call === "quit").length > quitsAfterFirstTry);
-});
-
-test("a Find My that never starts is logged, and the next open tries again", async () => {
+test("a Find My that never starts is launched again while the map is open", async () => {
     const world = fakeWorld({ neverStarts: true });
     const mirror = new FindMyMirror(world.io);
     mirror.setViewer("pixel", true);
-    await world.advance(30_000);
-    assert.match(world.logs.join("\n"), /did not start/);
+    await world.advance(10_000);
+    assert.equal(world.launches(), 1, "it is given time to start");
 
-    mirror.setViewer("pixel", false);
-    await world.advance(1000);
+    await world.advance(30_000);
+    world.startWorking();
+    await world.advance(30_000);
+
+    assert.ok(world.launches() >= 2);
+    assert.equal(world.isRunning(), true);
+});
+
+test("a Find My quit by hand while the map is open is launched again", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
     await openMap(world, mirror);
+
+    world.quitByHand();
+    await world.advance(7000);
+
     assert.equal(world.launches(), 2);
+    assert.equal(world.isRunning(), true);
+});
+
+test("a Find My opened by hand with no map open is left alone", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror);
+    mirror.setViewer("pixel", false);
+    await world.advance(2000);
+
+    world.openByHand();
+    await world.advance(60_000);
+
+    assert.equal(world.quits(), 1, "only the Find My launched for the map was quit");
+    assert.equal(world.isRunning(), true);
+});
+
+test("a Find My launched before a server restart is quit when no map is open", async () => {
+    const world = fakeWorld({ running: true, launchedEarlier: true });
+    new FindMyMirror(world.io);
+
+    await world.advance(2000);
+
+    assert.equal(world.isRunning(), false);
 });
 
 test("a write during a publish is published again once that publish finishes", async () => {
@@ -280,160 +355,189 @@ test("a write during a publish is published again once that publish finishes", a
     assert.equal(world.calls.filter(call => call === "publish-friends").length, 2);
 });
 
-test("tapping a person with the map open follows them in the running Find My", async () => {
+test("the selected person is followed, another switches, none stops", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
     await openMap(world, mirror);
 
-    assert.equal(await mirror.follow("friend-one"), true);
-    assert.equal(await mirror.follow("friend-two"), true);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(1000);
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(1000);
+    mirror.setViewer("pixel", true, null);
+    await world.advance(1000);
 
-    assert.deepEqual(world.follows(), ["follow:friend-one", "follow:friend-two"]);
+    assert.deepEqual(world.follows(), ["follow:friend-mom", "follow:friend-dad", "unfollow"]);
     assert.equal(world.launches(), 1, "following never relaunches");
+    assert.equal(world.isRunning(), true, "Find My stays up for the open map");
 });
 
-test("a tap with no map open is refused and sends nothing", async () => {
-    const world = fakeWorld({ running: true });
-    const mirror = new FindMyMirror(world.io);
-
-    assert.equal(await mirror.follow("friend-one"), false);
-    assert.deepEqual(world.follows(), []);
-});
-
-test("a tap while Find My is starting is applied once it is up", async () => {
+test("a selection sent with the opening is followed once Find My is up", async () => {
     const world = fakeWorld({ readyAfterMs: 500 });
     const mirror = new FindMyMirror(world.io);
-    mirror.setViewer("pixel", true);
+
+    mirror.setViewer("pixel", true, "mom@example.com");
     await world.advance(100);
+    assert.deepEqual(world.follows(), [], "nothing to follow in yet");
+    await world.advance(3000);
 
-    const tapped = mirror.follow("friend-one");
-    await world.advance(2000);
-
-    assert.equal(await tapped, true);
-    assert.deepEqual(world.follows(), ["follow:friend-one"]);
+    assert.deepEqual(world.follows(), ["follow:friend-mom"]);
 });
 
-test("only the last of several quick taps reports being followed", async () => {
+test("the same selection reported again sends nothing more", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
+    await openMap(world, mirror, "pixel", "mom@example.com");
+
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(5000);
+
+    assert.deepEqual(world.follows(), ["follow:friend-mom"]);
+});
+
+test("the person is looked up once per selection, not on every check", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "mom@example.com");
+
+    await world.advance(30_000);
+
+    assert.equal(world.lookups(), 1);
+});
+
+test("of several quick selections only the last is followed", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "mom@example.com");
     world.blockCommands();
 
-    const first = mirror.follow("friend-one");
+    mirror.setViewer("pixel", true, "dad@example.com");
     await world.advance(0);
-    const second = mirror.follow("friend-two");
-    const third = mirror.follow("friend-three");
+    mirror.setViewer("pixel", true, "carol@example.com");
+    mirror.setViewer("pixel", true, "mom@example.com");
+    mirror.setViewer("pixel", true, "carol@example.com");
     world.releaseCommand();
-    await world.advance(0);
+    await world.advance(2000);
 
-    assert.equal(await first, false);
-    assert.equal(await second, false);
-    assert.equal(await third, true);
-    assert.deepEqual(world.follows(), ["follow:friend-one", "follow:friend-three"]);
+    assert.deepEqual(world.follows(), ["follow:friend-mom", "follow:friend-dad", "follow:friend-carol"]);
 });
 
-test("stopping keeps Find My up for the open map", async () => {
+test("with two maps open, the most recently changed one's selection is followed", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
-    await mirror.follow("friend-one");
+    await openMap(world, mirror, "pixel", "mom@example.com");
+    await openMap(world, mirror, "laptop", "dad@example.com");
 
-    assert.equal(await mirror.follow(null), false);
-    assert.deepEqual(world.follows(), ["follow:friend-one", "unfollow"]);
+    mirror.setViewer("laptop", false);
+    await world.advance(2000);
+
+    assert.deepEqual(world.follows(), ["follow:friend-mom", "follow:friend-dad", "follow:friend-mom"]);
+});
+
+test("a person not in Find My's roster is not followed, which stops a follow", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "mom@example.com");
+
+    mirror.setViewer("pixel", true, "stranger@example.com");
+    await world.advance(2000);
+
+    assert.deepEqual(world.follows(), ["follow:friend-mom", "unfollow"]);
+});
+
+test("a person who cannot be looked up is not followed", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    world.failLookups();
+
+    await openMap(world, mirror, "pixel", "mom@example.com");
+    await world.advance(2000);
+
+    assert.deepEqual(world.follows(), []);
     assert.equal(world.isRunning(), true);
 });
 
-test("a failed follow or stop relaunches Find My, which follows nobody", async () => {
-    for (const target of ["friend-two", null]) {
+test("a selection with no map open sends nothing and launches nothing", async () => {
+    const world = fakeWorld({ running: true });
+    const mirror = new FindMyMirror(world.io);
+
+    mirror.setViewer("pixel", false, "mom@example.com");
+    await world.advance(5000);
+
+    assert.deepEqual(world.follows(), []);
+    assert.equal(world.launches(), 0);
+});
+
+test("a failed command relaunches Find My, which then follows the selection again", async () => {
+    for (const selection of ["dad@example.com", null]) {
         const world = fakeWorld();
         const mirror = new FindMyMirror(world.io);
-        await openMap(world, mirror);
-        await mirror.follow("friend-one");
+        await openMap(world, mirror, "pixel", "mom@example.com");
         world.failNextCommand();
 
-        const result = mirror.follow(target);
-        await world.advance(2000);
+        mirror.setViewer("pixel", true, selection);
+        await world.advance(5000);
 
-        assert.equal(await result, false, `${target}`);
-        assert.equal(world.launches(), 2, `${target}: a fresh Find My`);
-        assert.equal(world.isRunning(), true, `${target}: still up for the open map`);
+        assert.equal(world.launches(), 2, `${selection}: a fresh Find My`);
+        assert.equal(world.isRunning(), true, `${selection}: still up for the open map`);
+        const expected = selection === null ? [] : ["follow:friend-dad"];
+        assert.deepEqual(world.follows().slice(2), expected, `${selection}: a fresh Find My follows nobody until asked`);
     }
+});
+
+test("after a failed command, a Find My that will not quit is asked again until it does", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "mom@example.com");
+    world.failNextCommand();
+    world.refuseQuits(30);
+
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(10_000);
+    assert.equal(world.launches(), 1, "not relaunched while the old one is still up");
+    assert.deepEqual(world.follows(), ["follow:friend-mom", "follow:friend-dad"], "nothing sent to a Find My in an unknown state");
+
+    await world.advance(30_000);
+    assert.equal(world.launches(), 2);
+    assert.deepEqual(world.follows().slice(2), ["follow:friend-dad"]);
+    world.touch("db");
+    await world.advance(1000);
+    assert.ok(world.published().includes("publish-friends"), "its writes are published again");
 });
 
 test("closing the map while following quits Find My at once, which ends the follow", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
-    await mirror.follow("friend-one");
+    await openMap(world, mirror, "pixel", "mom@example.com");
 
     mirror.setViewer("pixel", false);
     await world.advance(1000);
 
     assert.equal(world.isRunning(), false);
-    assert.equal(await mirror.follow("friend-one"), false, "nothing to follow in");
+    assert.deepEqual(world.follows(), ["follow:friend-mom"], "quitting ends it; no stop is needed");
 });
 
-test("a relaunch that cannot quit Find My with the map open is tried again until it can", async () => {
+test("closing the map while a follow is still being sent quits Find My once it is sent", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
     await openMap(world, mirror);
-    await mirror.follow("friend-one");
-    world.failNextCommand();
-    world.refuseQuits(1000);
-
-    const result = mirror.follow("friend-two");
-    await world.advance(30_000);
-    assert.equal(await result, false);
-    assert.equal(world.launches(), 1, "Find My would not quit, so it was not relaunched");
-
-    world.refuseQuits(0);
-    await world.advance(60_000);
-    assert.equal(world.launches(), 2, "relaunched once Find My quit");
-    assert.equal(await mirror.follow("friend-two"), true, "taps reach the fresh Find My");
-    world.touch("db");
-    await world.advance(1000);
-    assert.ok(world.calls.includes("publish-friends"), "its writes are published again");
-});
-
-test("a relaunch waiting to try again is dropped once the map closes", async () => {
-    const world = fakeWorld();
-    const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
-    world.failNextCommand();
-    world.refuseQuits(1000);
-    const result = mirror.follow("friend-one");
-    await world.advance(30_000);
-    assert.equal(await result, false);
-
-    mirror.setViewer("pixel", false);
-    world.refuseQuits(0);
-    await world.advance(120_000);
-
-    assert.equal(world.launches(), 1);
-    assert.equal(world.isRunning(), false, "quit for the closed map");
-});
-
-test("a tap still looking up its person does not overtake a stop sent after it", async () => {
-    const world = fakeWorld();
-    const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
-    let found!: (friendId: string) => void;
-
-    const tapped = mirror.follow(new Promise<string>(resolve => (found = resolve)));
-    const stopped = mirror.follow(null);
-    found("friend-one");
+    world.blockCommands();
+    mirror.setViewer("pixel", true, "mom@example.com");
     await world.advance(0);
 
-    assert.equal(await tapped, false);
-    assert.equal(await stopped, false);
-    assert.deepEqual(world.follows(), ["unfollow"], "the tap was replaced before it reached Find My");
+    mirror.setViewer("pixel", false);
+    world.releaseCommand();
+    await world.advance(2000);
+
+    assert.equal(world.isRunning(), false);
 });
 
-test("a tap whose person cannot be found fails without holding up later taps", async () => {
-    const world = fakeWorld();
-    const mirror = new FindMyMirror(world.io);
-    await openMap(world, mirror);
-
-    await assert.rejects(mirror.follow(Promise.reject(new Error("not in the roster"))), /not in the roster/);
-    assert.equal(await mirror.follow("friend-two"), true);
+test("the screen message names a selected person only by a usable handle", () => {
+    assert.equal(findMyScreenHandle({ open: true, handle: "mom@example.com" }), "mom@example.com");
+    assert.equal(findMyScreenHandle({ open: true, handle: null }), null);
+    assert.equal(findMyScreenHandle({ open: true }), null, "clients from before selections");
+    assert.equal(findMyScreenHandle({ open: true, handle: "   " }), null);
+    assert.equal(findMyScreenHandle({ open: true, handle: 7 }), null);
+    assert.equal(findMyScreenHandle({ open: true, handle: "a".repeat(321) }), null);
+    assert.equal(findMyScreenHandle(null), null);
 });

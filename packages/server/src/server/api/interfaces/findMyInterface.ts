@@ -44,7 +44,6 @@ import {
     requestFindMyLiveBridge
 } from "@server/api/lib/findmy/FindMyLiveBridgeHost";
 import { buildFindMyRoster, findMyFriendIdForHandle } from "@server/api/lib/findmy/FindMyFriendRoster";
-import { FindMyLiveTrackingNotFound } from "@server/api/lib/findmy/FindMyLiveTrackingRequest";
 
 export class FindMyInterface {
     // Shared so the coordinate-cell cache survives between refreshes. Created lazily because
@@ -137,6 +136,10 @@ export class FindMyInterface {
             },
             // Hidden (-g -j) with the live-location bridge loaded; it idles until a friend is tapped
             launchFindMyHidden: () => this.getLiveBridge().launch(),
+            // A bridge socket outlives the server only along with the Find My it was launched into
+            launchedEarlier: () => fs.existsSync(FileSystem.findMyLiveSocket),
+            forgetLaunch: () => this.getLiveBridge().reset(),
+            friendIdFor: handle => this.friendIdForHandle(handle),
             startLiveTracking: friendId => this.getLiveBridge().start(friendId),
             stopLiveTracking: () => this.getLiveBridge().stop(),
             friendFiles: () => {
@@ -166,25 +169,21 @@ export class FindMyInterface {
     }
 
     /** Follows one friend live by Apple's phone/email handle, as clicking them in Find My does; null stops. */
-    static async setTrackedFriend(handle: string | null): Promise<boolean> {
-        if (!isMinSonoma14_4) throw new Error("Selected-person live tracking requires macOS 14.4 or newer");
-        // Handed over before the lookup, so a stop sent while it runs still comes after it
-        return this.getMirror().follow(handle === null ? null : this.friendIdForHandle(handle));
-    }
-
-    private static async friendIdForHandle(handle: string): Promise<string> {
+    /** Apple's id for the friend a client names by phone/email; null when Find My has no such friend. */
+    private static async friendIdForHandle(handle: string): Promise<string | null> {
         const key = await Server().findMyKeys.loadCacheKey("FMF");
         if (!key) throw new Error("The Find My FMF key is not imported");
         const roster = buildFindMyRoster(readFmfRosterData(key, FileSystem.findMyFmfCacheDir));
-        const friendId = roster ? findMyFriendIdForHandle(roster, handle) : null;
-        if (!friendId) throw new FindMyLiveTrackingNotFound();
-        return friendId;
+        return roster ? findMyFriendIdForHandle(roster, handle) : null;
     }
 
-    /** A client's Find My map opened or closed; Find My runs while one is open. */
-    static setFindMyViewer(clientId: string, open: boolean): void {
+    /**
+     * A client's Find My map opened or closed, and who it has selected (a phone/email, or null).
+     * Find My runs while one is open and follows the selected person live.
+     */
+    static setFindMyViewer(clientId: string, open: boolean, handle: string | null = null): void {
         if (!isMinSonoma14_4) return;
-        this.getMirror().setViewer(clientId, open);
+        this.getMirror().setViewer(clientId, open, handle);
     }
 
     /**
