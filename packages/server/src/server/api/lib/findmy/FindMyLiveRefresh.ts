@@ -8,8 +8,11 @@ export type LiveRefreshIo = {
     isFindMyReady: () => Promise<boolean>;
     /** Asks Find My to quit; it is gone once isFindMyRunning says so */
     quitFindMy: () => Promise<void>;
-    /** Launches Find My without showing it; it is up once isFindMyReady says so */
+    /** Launches Find My without showing it, with the local live-location bridge loaded. */
     launchFindMyHidden: () => Promise<void>;
+    /** Starts/stops Apple's live session for one friend inside the running Find My. */
+    startLiveTracking: (friendId: string) => Promise<void>;
+    stopLiveTracking: () => Promise<void>;
     /** Find My's friend locations (LocalStorage.db and its WAL) */
     friendFiles: () => string[];
     /** Find My's device and item caches */
@@ -127,6 +130,11 @@ export class FindMyLiveRefresh {
     private readonly viewers = new Set<string>();
     private cancelCheck: (() => void) | null = null;
     private processTransition: Promise<void> = Promise.resolve();
+    /** The friend Apple is following in the running Find My; a new Find My follows nobody. */
+    private followed: string | null = null;
+    /** The latest tap. An earlier tap still queued when another arrives is dropped. */
+    private latestTap: string | null = null;
+    private taps: Promise<void> = Promise.resolve();
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
@@ -146,6 +154,59 @@ export class FindMyLiveRefresh {
 
     get round(): FindMyRound {
         return { ...this.current };
+    }
+
+    /**
+     * Follows one friend live, as clicking them in Find My on the Mac does: it acts on the Find My
+     * an open screen is already running and never launches one of its own. Another friend
+     * switches; null stops. Closing the last screen quits Find My, which ends the follow. Resolves
+     * true only when this friend is being followed and no later tap has replaced them.
+     */
+    setTrackedFriend(friendId: string | null): Promise<boolean> {
+        this.latestTap = friendId;
+        const tap = this.taps.then(() => this.applyTap(friendId));
+        this.taps = tap.then(
+            () => undefined,
+            () => undefined
+        );
+        return tap;
+    }
+
+    private async applyTap(friendId: string | null): Promise<boolean> {
+        if (friendId !== this.latestTap) return false;
+        let failed = false;
+        // On the process queue, so a tap never reaches a Find My that is quitting or relaunching
+        const followed = await this.runProcessTransition(async () => {
+            if (friendId === this.followed) return friendId !== null;
+            if (friendId === null) {
+                try {
+                    await this.io.stopLiveTracking();
+                } catch (error) {
+                    this.io.log(`Find My live tracking: stop failed: ${error}`);
+                    failed = true;
+                }
+                this.followed = null;
+                return false;
+            }
+            if (!this.active || this.viewers.size === 0 || !(await this.io.isFindMyReady())) return false;
+            try {
+                await this.io.startLiveTracking(friendId);
+                this.followed = friendId;
+                return true;
+            } catch (error) {
+                this.io.log(`Find My live tracking: start failed: ${error}`);
+                failed = true;
+                return false;
+            }
+        });
+        if (failed) {
+            if (this.latestTap === friendId) this.latestTap = null;
+            // Apple may still be following someone in that Find My; a fresh one follows nobody
+            if (this.viewers.size > 0) await this.start({ force: true });
+            else this.endIfDone();
+            return false;
+        }
+        return followed && friendId === this.latestTap;
     }
 
     /** A client's Find My screen opened or closed. Opening one starts or joins a round. */
@@ -184,6 +245,7 @@ export class FindMyLiveRefresh {
         try {
             await this.runProcessTransition(async () => {
                 if ((await this.io.isFindMyRunning()) && !(await this.quit())) throw new Error("Find My did not quit");
+                this.followed = null;
                 await this.io.launchFindMyHidden();
                 if (!(await this.waitUntil(this.io.isFindMyReady, true))) throw new Error("Find My did not start");
             });
@@ -306,6 +368,9 @@ export class FindMyLiveRefresh {
         this.cancelCheck?.();
         this.cancelCheck = null;
         this.io.log("Find My refresh: round over and no Find My screen is open; quitting Find My");
-        void this.runProcessTransition(() => this.quit());
+        void this.runProcessTransition(async () => {
+            // Quitting Find My ends Apple's follow, as closing it on the Mac does
+            if (await this.quit()) this.followed = null;
+        });
     }
 }

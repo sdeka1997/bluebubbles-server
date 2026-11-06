@@ -21,6 +21,8 @@ const fakeWorld = (
         readyAfterMs?: number;
         startsMidLaunch?: boolean;
         refusesQuits?: number;
+        failLiveStarts?: number;
+        failLiveStops?: number;
         friends?: string[];
     } = {}
 ) => {
@@ -42,6 +44,10 @@ const fakeWorld = (
     const rounds: FindMyRound[] = [];
     let releasePublish: (() => void) | null = null;
     let blockPublish = false;
+    let releaseLiveStart: (() => void) | null = null;
+    let blockLiveStart = false;
+    let liveStartFailures = options.failLiveStarts ?? 0;
+    let liveStopFailures = options.failLiveStops ?? 0;
 
     const io: LiveRefreshIo = {
         isFindMyRunning: async () => running,
@@ -59,6 +65,21 @@ const fakeWorld = (
             ready = false;
             io.schedule(() => (running = true), 300);
             io.schedule(() => (ready = true), 300 + (options.readyAfterMs ?? 0));
+        },
+        startLiveTracking: async friendId => {
+            calls.push(`start-live:${friendId}`);
+            if (blockLiveStart) await new Promise<void>(resolve => (releaseLiveStart = resolve));
+            if (liveStartFailures > 0) {
+                liveStartFailures--;
+                throw new Error("bridge unavailable");
+            }
+        },
+        stopLiveTracking: async () => {
+            calls.push("stop-live");
+            if (liveStopFailures > 0) {
+                liveStopFailures--;
+                throw new Error("bridge unavailable");
+            }
         },
         friendFiles: () => ["db", "db-wal"],
         deviceFiles: () => ["Devices.data"],
@@ -126,6 +147,12 @@ const fakeWorld = (
         isRunning: () => running,
         pendingTimers: () => timers.length,
         blockPublishes: () => (blockPublish = true),
+        blockLiveStarts: () => (blockLiveStart = true),
+        failNextLiveStart: () => liveStartFailures++,
+        releaseLiveStart: () => {
+            blockLiveStart = false;
+            releaseLiveStart?.();
+        },
         releasePublish: () => {
             blockPublish = false;
             releasePublish?.();
@@ -574,6 +601,194 @@ test("each round's end is announced once", async () => {
     await world.advance(3 * FIND_MY_ROUND_QUIET_MS);
 
     assert.equal(world.rounds.filter(round => round.id === 1 && !round.collecting).length, 1);
+});
+
+/** Opens a Find My screen and waits until Find My is up, as the Pixel does before a tap. */
+const openScreen = async (world: ReturnType<typeof fakeWorld>, refresh: FindMyLiveRefresh) => {
+    refresh.setViewer("pixel", true);
+    await world.advance(1000);
+};
+
+test("tapping a person with the screen open follows them in the running Find My", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+
+    const tapped = refresh.setTrackedFriend("friend-one");
+    await world.advance(0);
+
+    assert.equal(await tapped, true);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-one"]);
+    assert.equal(world.launches(), 1, "following needs no relaunch");
+});
+
+test("tapping another person switches inside the same Find My", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+
+    const first = refresh.setTrackedFriend("friend-one");
+    const second = refresh.setTrackedFriend("friend-two");
+    await world.advance(0);
+
+    assert.equal(await first, false, "superseded before it was confirmed");
+    assert.equal(await second, true);
+    assert.equal(world.calls.filter(call => call.startsWith("start-live:")).at(-1), "start-live:friend-two");
+    assert.equal(world.launches(), 1);
+});
+
+test("a tap with no Find My screen open is refused and not remembered", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    assert.equal(await refresh.setTrackedFriend("friend-one"), false);
+    await openScreen(world, refresh);
+
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), []);
+});
+
+test("a tap while Find My is starting is applied once it is up", async () => {
+    const world = fakeWorld({ readyAfterMs: 500 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(100);
+
+    const tapped = refresh.setTrackedFriend("friend-one");
+    await world.advance(2000);
+
+    assert.equal(await tapped, true);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-one"]);
+    assert.equal(world.launches(), 1);
+});
+
+test("a tap during the ready-time follow ends on the last person, and only they are reported", async () => {
+    const world = fakeWorld({ readyAfterMs: 500 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(100);
+    const second = refresh.setTrackedFriend("friend-two");
+    world.blockLiveStarts();
+    await world.advance(1000);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-two"]);
+
+    const third = refresh.setTrackedFriend("friend-three");
+    world.releaseLiveStart();
+    await world.advance(1000);
+
+    assert.equal(await second, false);
+    assert.equal(await third, true);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), [
+        "start-live:friend-two",
+        "start-live:friend-three"
+    ]);
+});
+
+test("a failed tap is forgotten, so a later refresh does not follow them", async () => {
+    const world = fakeWorld({ failLiveStarts: 1 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+
+    const tapped = refresh.setTrackedFriend("friend-one");
+    await world.advance(2000);
+    assert.equal(await tapped, false);
+    const followsAfterFailure = world.calls.filter(call => call.startsWith("start-live:")).length;
+
+    void refresh.start({ force: true });
+    await world.advance(2000);
+    assert.equal(world.calls.filter(call => call.startsWith("start-live:")).length, followsAfterFailure);
+});
+
+test("a refresh while a stop is pending does not follow the old person again", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+    assert.equal(await refresh.setTrackedFriend("friend-one"), true);
+
+    const stopped = refresh.setTrackedFriend(null);
+    void refresh.start({ force: true });
+    await world.advance(2000);
+
+    assert.equal(await stopped, false);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-one"]);
+});
+
+test("stopping leaves Find My up for the open screen", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+    assert.equal(await refresh.setTrackedFriend("friend-one"), true);
+
+    assert.equal(await refresh.setTrackedFriend(null), false);
+    assert.ok(world.calls.includes("stop-live"));
+    assert.equal(world.isRunning(), true);
+});
+
+test("a failed stop relaunches Find My so nobody is left being followed", async () => {
+    const world = fakeWorld({ failLiveStops: 1 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+    assert.equal(await refresh.setTrackedFriend("friend-one"), true);
+
+    const stopped = refresh.setTrackedFriend(null);
+    await world.advance(2000);
+
+    assert.equal(await stopped, false);
+    assert.equal(world.launches(), 2, "a fresh Find My follows nobody");
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-one"]);
+});
+
+test("a failed switch relaunches Find My and reports nobody followed", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+    assert.equal(await refresh.setTrackedFriend("friend-one"), true);
+    world.failNextLiveStart();
+
+    const switched = refresh.setTrackedFriend("friend-two");
+    await world.advance(2000);
+
+    assert.equal(await switched, false);
+    assert.equal(world.launches(), 2);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), [
+        "start-live:friend-one",
+        "start-live:friend-two"
+    ]);
+});
+
+test("rounds still end and the next screen still relaunches after a failed stop", async () => {
+    const world = fakeWorld({ failLiveStops: 1 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+    assert.equal(await refresh.setTrackedFriend("friend-one"), true);
+    void refresh.setTrackedFriend(null);
+    await world.advance(2000);
+
+    await world.advance(2 * FIND_MY_ROUND_QUIET_MS);
+    assert.equal(refresh.round.collecting, false);
+    refresh.setViewer("pixel", false);
+    await world.advance(2000);
+    assert.equal(world.isRunning(), false);
+
+    const launchesBefore = world.launches();
+    await openScreen(world, refresh);
+    assert.equal(world.launches(), launchesBefore + 1);
+    assert.equal(refresh.round.collecting, true);
+});
+
+test("closing the last Find My screen stops following, and Find My then quits", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    await openScreen(world, refresh);
+    assert.equal(await refresh.setTrackedFriend("friend-one"), true);
+    for (const id of ["dad", "mom", "kid"]) world.report(id);
+    await world.advance(2000);
+
+    refresh.setViewer("pixel", false);
+    await world.advance(2000);
+
+    assert.equal(world.isRunning(), false);
+    await openScreen(world, refresh);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-one"]);
 });
 
 test("round ids keep growing across a server restart", async () => {
