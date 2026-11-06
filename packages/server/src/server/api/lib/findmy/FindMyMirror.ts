@@ -171,6 +171,8 @@ export class FindMyMirror {
     /** When the last map closed, while none is open */
     private closedAt: number | null = null;
     private readonly keepAfterCloseMs: number;
+    /** A client opened its app: start Find My ahead of the map, once, if none is running */
+    private warmWanted = false;
 
     /** Whether the running Find My is one this server launched, and so may quit */
     private ours = false;
@@ -233,6 +235,18 @@ export class FindMyMirror {
         this.check();
     }
 
+    /**
+     * A client opened its app, so its map may open soon: Find My is started now, following nobody,
+     * and kept a minute as if a map had just closed, so the map finds it already running.
+     */
+    warm(): void {
+        if (this.isOpen) return;
+        if (!this.kept()) this.opening++;
+        this.closedAt = this.io.now();
+        this.warmWanted = true;
+        this.check();
+    }
+
     /** Runs a check now, or right after the one running. */
     private check(): void {
         this.changed = true;
@@ -286,7 +300,10 @@ export class FindMyMirror {
             this.ours = false;
             this.ourPid = null;
             this.startingSince = null;
-            if (!this.isOpen) return false;
+            // Started ahead of the map only once: one quit by hand stays quit until a map opens
+            const warming = this.warmWanted && this.kept();
+            this.warmWanted = false;
+            if (!this.isOpen && !warming) return false;
             await this.launch();
             return true;
         }
@@ -312,6 +329,8 @@ export class FindMyMirror {
             if (this.ours && asking) this.ours = await this.stillOurs();
             if (this.ours) await this.quit("no map is open");
             else this.quittingSince = this.quitAskedAt = null;
+            // A Find My opened by hand is never replaced to get ahead of the map
+            if (!this.ours) this.warmWanted = false;
             return this.ours;
         }
 

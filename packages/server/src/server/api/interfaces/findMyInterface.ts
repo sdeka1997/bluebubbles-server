@@ -206,6 +206,12 @@ export class FindMyInterface {
         this.getMirror().setViewer(clientId, open, handle);
     }
 
+    /** A client's app came to the foreground: Find My is started ahead of its map, for a minute. */
+    static warmFindMy(): void {
+        if (!isMinSonoma14_4) return;
+        this.getMirror().warm();
+    }
+
     /**
      * macOS 14.4+ keeps friends and devices in encrypted caches, read with the user-imported keys.
      * Never uses the Private API helper, which no longer reports Find My data there.

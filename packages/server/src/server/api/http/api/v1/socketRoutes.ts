@@ -1078,6 +1078,15 @@ export class SocketRoutes {
             return response(cb, "findmy-screen", createSuccessResponse(null, "Find My screen state recorded"));
         });
 
+        /**
+         * The client's app came to the foreground, so its Find My map may open soon: Find My is
+         * started ahead of it, following nobody, and quits a minute later if no map opens.
+         */
+        socket.on("findmy-warm", (_, cb): void => {
+            FindMyInterface.warmFindMy();
+            return response(cb, "findmy-warm", createSuccessResponse(null, "Find My started ahead of the map"));
+        });
+
         socket.on("disconnect", reason => {
             log.info(`Client ${socket.id} disconnected! Reason: ${reason}`);
             // A client that drops can't say its Find My screen closed

@@ -1143,3 +1143,68 @@ test("a start that breaks mid-request right after launch is sent again, without 
     assert.equal(world.launches(), 1, "Find My is fine; the connection only broke");
     assert.equal(world.appleFollows(), "friend-mom");
 });
+
+test("opening the app starts Find My ahead of the map, following nobody, and lets it go after a minute", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.warm();
+    await world.advance(2000);
+
+    assert.equal(world.launches(), 1);
+    assert.equal(world.isRunning(), true);
+    assert.deepEqual(world.follows(), [], "nobody to follow yet");
+    await world.advance(65_000);
+    assert.equal(world.isRunning(), false, "let go once the minute is up");
+    assert.equal(world.launches(), 1);
+});
+
+test("a map opened soon after the app uses the Find My started for it and follows at once", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.warm();
+    await world.advance(20_000);
+
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(1000);
+    assert.equal(world.launches(), 1);
+    assert.equal(world.quits(), 0);
+    assert.equal(world.appleFollows(), "friend-mom");
+});
+
+test("starting Find My ahead of the map never takes over one opened by hand", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await world.advance(1000);
+    world.openByHand();
+    mirror.warm();
+    await world.advance(65_000);
+
+    assert.equal(world.launches(), 0);
+    assert.equal(world.quits(), 0);
+    assert.equal(world.forceQuits(), 0);
+    assert.equal(world.isRunning(), true);
+});
+
+test("a Find My started ahead of the map and quit by hand is not started again until a map opens", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.warm();
+    await world.advance(3000);
+    world.quitByHand();
+    await world.advance(30_000);
+
+    assert.equal(world.launches(), 1);
+    assert.equal(world.isRunning(), false);
+});
+
+test("opening the app while a map is open changes nothing", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "mom@example.com");
+    mirror.warm();
+    await world.advance(5000);
+
+    assert.equal(world.launches(), 1);
+    assert.equal(world.quits(), 0);
+    assert.equal(world.appleFollows(), "friend-mom");
+});
