@@ -21,6 +21,8 @@ const fakeWorld = (
         readyAfterMs?: number;
         startsMidLaunch?: boolean;
         refusesQuits?: number;
+        failLiveStarts?: number;
+        failLiveStops?: number;
         friends?: string[];
     } = {}
 ) => {
@@ -42,6 +44,11 @@ const fakeWorld = (
     const rounds: FindMyRound[] = [];
     let releasePublish: (() => void) | null = null;
     let blockPublish = false;
+    let releaseLiveStart: (() => void) | null = null;
+    let blockLiveStart = false;
+    let liveStartFailures = options.failLiveStarts ?? 0;
+    let liveStopFailures = options.failLiveStops ?? 0;
+    let liveHostPresent = false;
 
     const io: LiveRefreshIo = {
         isFindMyRunning: async () => running,
@@ -53,13 +60,34 @@ const fakeWorld = (
             // Quitting takes a moment to register, as it does for the real app
             io.schedule(() => (running = false), 200);
         },
-        launchFindMyHidden: async () => {
-            calls.push("launch-hidden");
+        launchFindMyHidden: async (withLiveBridge = false) => {
+            calls.push(withLiveBridge ? "launch-bridge" : "launch-hidden");
+            liveHostPresent = withLiveBridge;
             if (options.neverStarts) return;
             ready = false;
             io.schedule(() => (running = true), 300);
             io.schedule(() => (ready = true), 300 + (options.readyAfterMs ?? 0));
         },
+        startLiveTracking: async friendId => {
+            calls.push(`start-live:${friendId}`);
+            if (blockLiveStart) await new Promise<void>(resolve => (releaseLiveStart = resolve));
+            if (liveStartFailures > 0) {
+                liveStartFailures--;
+                throw new Error("bridge unavailable");
+            }
+        },
+        stopLiveTracking: async () => {
+            calls.push("stop-live");
+            if (liveStopFailures > 0) {
+                liveStopFailures--;
+                throw new Error("bridge unavailable");
+            }
+        },
+        resetLiveTracking: () => {
+            calls.push("reset-live");
+            liveHostPresent = false;
+        },
+        hasLiveTrackingHost: () => liveHostPresent,
         friendFiles: () => ["db", "db-wal"],
         deviceFiles: () => ["Devices.data"],
         stat: file => files.get(file) ?? null,
@@ -126,6 +154,12 @@ const fakeWorld = (
         isRunning: () => running,
         pendingTimers: () => timers.length,
         blockPublishes: () => (blockPublish = true),
+        blockLiveStarts: () => (blockLiveStart = true),
+        failNextLiveStart: () => liveStartFailures++,
+        releaseLiveStart: () => {
+            blockLiveStart = false;
+            releaseLiveStart?.();
+        },
         releasePublish: () => {
             blockPublish = false;
             releasePublish?.();
@@ -574,6 +608,162 @@ test("each round's end is announced once", async () => {
     await world.advance(3 * FIND_MY_ROUND_QUIET_MS);
 
     assert.equal(world.rounds.filter(round => round.id === 1 && !round.collecting).length, 1);
+});
+
+test("a bridge crash during switch relaunches and applies the new target", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    const selected = refresh.setTrackedFriend("friend-one");
+    await world.advance(1000);
+    assert.equal(await selected, true);
+    world.calls.length = 0;
+    world.failNextLiveStart();
+
+    const switched = refresh.setTrackedFriend("friend-two");
+    await world.advance(2000);
+
+    assert.equal(await switched, true);
+    const recoveryCalls = world.calls.filter(call => ["quit", "reset-live", "launch-bridge"].includes(call));
+    assert.deepEqual(recoveryCalls, ["quit", "reset-live", "launch-bridge"], JSON.stringify(world.calls));
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), [
+        "start-live:friend-two",
+        "start-live:friend-two"
+    ]);
+});
+
+test("a failed stop command falls back to quitting and resetting the injected host", async () => {
+    const world = fakeWorld({ failLiveStops: 1 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    const selected = refresh.setTrackedFriend("friend-one");
+    await world.advance(1000);
+    assert.equal(await selected, true);
+    world.calls.length = 0;
+
+    const stopped = refresh.setTrackedFriend(null);
+    await world.advance(1000);
+
+    assert.equal(await stopped, false);
+    assert.deepEqual(world.calls.filter(call => ["stop-live", "quit", "reset-live"].includes(call)), [
+        "stop-live",
+        "quit",
+        "reset-live"
+    ]);
+    assert.equal(world.isRunning(), false);
+});
+
+test("stop after a server restart quits and resets a surviving injected host", async () => {
+    const world = fakeWorld();
+    const beforeRestart = new FindMyLiveRefresh(world.io);
+    const selected = beforeRestart.setTrackedFriend("friend-one");
+    await world.advance(1000);
+    assert.equal(await selected, true);
+    world.calls.length = 0;
+
+    const afterRestart = new FindMyLiveRefresh(world.io);
+    const stopped = afterRestart.setTrackedFriend(null);
+    await world.advance(1000);
+
+    assert.equal(await stopped, false);
+    assert.deepEqual(world.calls.filter(call => call === "quit" || call === "reset-live"), ["quit", "reset-live"]);
+    assert.equal(world.isRunning(), false);
+});
+
+test("a failed bridge start quits and resets the injected host before retry", async () => {
+    const world = fakeWorld({ failLiveStarts: 1 });
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    const failed = refresh.setTrackedFriend("friend-one");
+    await world.advance(2000);
+    assert.equal(await failed, false);
+    assert.ok(world.calls.includes("reset-live"));
+    assert.equal(world.isRunning(), false);
+
+    const retried = refresh.setTrackedFriend("friend-one");
+    await world.advance(2000);
+    assert.equal(await retried, true);
+    assert.equal(world.calls.filter(call => call === "launch-bridge").length, 2);
+});
+
+test("selection during an ordinary startup upgrades it to one bridged launch", async () => {
+    const world = fakeWorld({ readyAfterMs: 500 });
+    const refresh = new FindMyLiveRefresh(world.io);
+    refresh.setViewer("pixel", true);
+    await world.advance(100);
+
+    const selected = refresh.setTrackedFriend("friend-one");
+    await world.advance(2000);
+
+    assert.equal(await selected, true);
+    assert.equal(world.calls.filter(call => call === "launch").length, 0);
+    assert.equal(world.calls.filter(call => call === "launch-bridge").length, 1);
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-one"]);
+});
+
+test("serializes overlapping switches and stop in request order", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+    const selected = refresh.setTrackedFriend("friend-one");
+    await world.advance(1000);
+    await selected;
+    world.calls.length = 0;
+    world.blockLiveStarts();
+
+    const firstSwitch = refresh.setTrackedFriend("friend-two");
+    await world.advance(0);
+    const secondSwitch = refresh.setTrackedFriend("friend-three");
+    const stop = refresh.setTrackedFriend(null);
+    await world.advance(0);
+    assert.deepEqual(world.calls, ["start-live:friend-two"], "later requests wait for the blocked switch");
+
+    world.releaseLiveStart();
+    await Promise.all([firstSwitch, secondSwitch, stop]);
+    assert.deepEqual(world.calls, ["start-live:friend-two", "start-live:friend-three", "stop-live"]);
+});
+
+test("a failed bridged launch forgets the target so selecting it again retries", async () => {
+    const world = fakeWorld({ neverStarts: true });
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    const first = refresh.setTrackedFriend("friend-one");
+    await world.advance(30_000);
+    assert.equal(await first, false);
+    const launchesAfterFirst = world.calls.filter(call => call === "launch-bridge").length;
+
+    const retry = refresh.setTrackedFriend("friend-one");
+    await world.advance(30_000);
+    assert.equal(await retry, false);
+    assert.equal(world.calls.filter(call => call === "launch-bridge").length, launchesAfterFirst + 1);
+});
+
+test("switching the selected friend while Find My starts applies only the latest target", async () => {
+    const world = fakeWorld({ readyAfterMs: 500 });
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    const first = refresh.setTrackedFriend("friend-one");
+    await world.advance(100);
+    const second = refresh.setTrackedFriend("friend-two");
+
+    await world.advance(1500);
+    assert.equal(await first, true);
+    assert.equal(await second, true, "the latest pending selection was applied");
+    assert.deepEqual(world.calls.filter(call => call.startsWith("start-live:")), ["start-live:friend-two"]);
+    assert.equal(world.calls.filter(call => call === "launch-bridge").length, 1);
+});
+
+test("tracking one friend relaunches with the bridge, starts after readiness, and keeps Find My alive", async () => {
+    const world = fakeWorld();
+    const refresh = new FindMyLiveRefresh(world.io);
+
+    const selected = refresh.setTrackedFriend("opaque-friend-id");
+    await world.advance(1000);
+    assert.equal(await selected, true);
+    assert.deepEqual(world.calls.slice(0, 3), ["quit", "launch-bridge", "start-live:opaque-friend-id"]);
+
+    for (const id of ["dad", "mom", "kid"]) world.report(id);
+    await world.advance(2000);
+    assert.equal(refresh.round.endedBy, "everyone");
+    assert.equal(world.isRunning(), true, "the selected-person session owns Find My after the round ends");
+    assert.equal(world.calls.filter(call => call === "quit").length, 1, "only the relaunch quit happened");
 });
 
 test("round ids keep growing across a server restart", async () => {

@@ -8,8 +8,15 @@ export type LiveRefreshIo = {
     isFindMyReady: () => Promise<boolean>;
     /** Asks Find My to quit; it is gone once isFindMyRunning says so */
     quitFindMy: () => Promise<void>;
-    /** Launches Find My without showing it; it is up once isFindMyReady says so */
-    launchFindMyHidden: () => Promise<void>;
+    /** Launches Find My without showing it; a selected-person launch injects the local bridge. */
+    launchFindMyHidden: (withLiveBridge?: boolean) => Promise<void>;
+    /** Starts/stops Apple's live session inside an injected Find My. */
+    startLiveTracking: (friendId: string) => Promise<void>;
+    stopLiveTracking: () => Promise<void>;
+    /** Forgets the launch token and removes a stale bridge socket after Find My is gone. */
+    resetLiveTracking: () => void;
+    /** A surviving socket means a previous server instance launched an injected Find My. */
+    hasLiveTrackingHost: () => boolean;
     /** Find My's friend locations (LocalStorage.db and its WAL) */
     friendFiles: () => string[];
     /** Find My's device and item caches */
@@ -127,6 +134,11 @@ export class FindMyLiveRefresh {
     private readonly viewers = new Set<string>();
     private cancelCheck: (() => void) | null = null;
     private processTransition: Promise<void> = Promise.resolve();
+    /** Apple's opaque id currently confirmed inside the bridge. */
+    private trackedFriendId: string | null = null;
+    /** Latest requested target; updated immediately so a target changed during launch is coalesced. */
+    private requestedFriendId: string | null = null;
+    private trackingTransition: Promise<void> = Promise.resolve();
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
@@ -146,6 +158,56 @@ export class FindMyLiveRefresh {
 
     get round(): FindMyRound {
         return { ...this.current };
+    }
+
+    /**
+     * Selects the one friend Apple should follow live. The first selection
+     * relaunches Find My with the bridge; switching inside that host needs no
+     * relaunch. Null stops the selected session.
+     */
+    setTrackedFriend(friendId: string | null): Promise<boolean> {
+        this.requestedFriendId = friendId;
+        const operation = this.trackingTransition.then(() => this.applyTrackedFriend(friendId));
+        this.trackingTransition = operation.then(
+            () => undefined,
+            () => undefined
+        );
+        return operation;
+    }
+
+    private async applyTrackedFriend(friendId: string | null): Promise<boolean> {
+        if (friendId === null) {
+            if (this.trackedFriendId === null) {
+                if (this.io.hasLiveTrackingHost()) await this.resetInjectedHost();
+                return false;
+            }
+            try {
+                await this.io.stopLiveTracking();
+            } catch (_) {
+                await this.resetInjectedHost();
+                return false;
+            }
+            this.trackedFriendId = null;
+            this.endIfDone();
+            return false;
+        }
+        if (this.trackedFriendId !== null && this.active && !this.starting) {
+            if (friendId === this.trackedFriendId) return true;
+            try {
+                await this.io.startLiveTracking(friendId);
+                this.trackedFriendId = friendId;
+                return true;
+            } catch (_) {
+                await this.resetInjectedHost();
+            }
+        }
+        if (!(await this.waitForStartToFinish())) return false;
+        if (friendId !== this.requestedFriendId) return this.requestedFriendId !== null;
+        if (this.trackedFriendId === friendId && this.active) return true;
+        const started = await this.start({ force: true });
+        if (!started) return false;
+        this.trackedFriendId = this.requestedFriendId;
+        return this.trackedFriendId !== null;
     }
 
     /** A client's Find My screen opened or closed. Opening one starts or joins a round. */
@@ -184,11 +246,24 @@ export class FindMyLiveRefresh {
         try {
             await this.runProcessTransition(async () => {
                 if ((await this.io.isFindMyRunning()) && !(await this.quit())) throw new Error("Find My did not quit");
-                await this.io.launchFindMyHidden();
+                const trackingTarget = this.requestedFriendId ?? this.trackedFriendId;
+                await this.io.launchFindMyHidden(trackingTarget !== null);
                 if (!(await this.waitUntil(this.io.isFindMyReady, true))) throw new Error("Find My did not start");
+                const readyTarget = this.requestedFriendId ?? this.trackedFriendId;
+                if (readyTarget !== null) {
+                    await this.io.startLiveTracking(readyTarget);
+                    this.trackedFriendId = readyTarget;
+                }
             });
         } catch (error) {
             this.io.log(`Find My refresh: ${error instanceof Error ? error.message : error}`);
+            if (this.requestedFriendId !== null || this.trackedFriendId !== null) {
+                await this.runProcessTransition(async () => {
+                    if (await this.io.isFindMyRunning()) await this.quit();
+                    this.io.resetLiveTracking();
+                });
+                this.trackedFriendId = null;
+            }
             this.active = false;
             this.starting = false;
             this.endRound("failed");
@@ -278,6 +353,27 @@ export class FindMyLiveRefresh {
         return result;
     }
 
+    private async resetInjectedHost(): Promise<void> {
+        await this.runProcessTransition(async () => {
+            if ((await this.io.isFindMyRunning()) && !(await this.quit())) {
+                throw new Error("Find My did not quit while resetting live tracking");
+            }
+            this.io.resetLiveTracking();
+        });
+        this.trackedFriendId = null;
+        this.active = false;
+        this.cancelCheck?.();
+        this.cancelCheck = null;
+    }
+
+    private async waitForStartToFinish(): Promise<boolean> {
+        const deadline = this.io.now() + 2 * STEP_LIMIT_MS;
+        while (this.starting && this.io.now() < deadline) {
+            await new Promise<void>(resolve => this.io.schedule(resolve, STEP_CHECK_MS));
+        }
+        return !this.starting;
+    }
+
     private waitUntil(state: () => Promise<boolean>, wanted: boolean): Promise<boolean> {
         const deadline = this.io.now() + STEP_LIMIT_MS;
         return new Promise(resolve => {
@@ -301,7 +397,8 @@ export class FindMyLiveRefresh {
 
     /** Quits Find My once the round is over and no Find My screen is open. */
     private endIfDone(): void {
-        if (!this.active || this.starting || this.current.collecting || this.viewers.size > 0) return;
+        if (!this.active || this.starting || this.current.collecting || this.viewers.size > 0 || this.trackedFriendId !== null)
+            return;
         this.active = false;
         this.cancelCheck?.();
         this.cancelCheck = null;
