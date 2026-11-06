@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+    FindMyBridgeNotReady,
     FindMyLiveRejected,
     FindMyMirror,
     FindMyMirrorIo,
@@ -28,6 +29,8 @@ const fakeWorld = (
         launchedEarlier?: boolean;
         neverStarts?: boolean;
         neverReady?: boolean;
+        /** How long after Find My is up its bridge keeps answering "not ready" (the shim scans after 15 s) */
+        bridgeReadyAfterMs?: number;
         readyAfterMs?: number;
         refusesQuits?: number;
     } = {}
@@ -52,6 +55,9 @@ const fakeWorld = (
     let startRejection: string | null = null;
     let neverReady = options.neverReady ?? false;
     let forceQuitsIgnored = false;
+    /** Whether the running Find My is one launched with our bridge, as opposed to opened by hand */
+    let withBridge = running && (options.launchedEarlier ?? false);
+    let upAt: number | null = withBridge ? 0 : null;
     let releaseCommand: (() => void) | null = null;
     let blockCommands = false;
     let releasePublish: (() => void) | null = null;
@@ -77,23 +83,39 @@ const fakeWorld = (
             io.schedule(() => {
                 running = false;
                 ready = false;
+                withBridge = false;
+                upAt = null;
             }, 200);
         },
         launchFindMyHidden: async () => {
             calls.push("launch");
             if (neverStarts) return;
-            io.schedule(() => (running = true), 300);
-            if (!neverReady) io.schedule(() => (ready = true), 300 + (options.readyAfterMs ?? 0));
+            io.schedule(() => {
+                running = true;
+                withBridge = true;
+            }, 300);
+            if (!neverReady) {
+                io.schedule(() => {
+                    ready = true;
+                    upAt = now;
+                }, 300 + (options.readyAfterMs ?? 0));
+            }
         },
         forceQuitFindMy: async () => {
             calls.push("force-quit");
             if (forceQuitsIgnored) return;
             running = false;
             ready = false;
+            withBridge = false;
+            upAt = null;
         },
-        launchedEarlier: () => options.launchedEarlier ?? false,
+        isOurFindMyRunning: async () => running && withBridge,
         forgetLaunch: () => calls.push("forget"),
         startLiveTracking: async friendId => {
+            if (upAt === null || now - upAt < (options.bridgeReadyAfterMs ?? 0)) {
+                calls.push("bridge-not-ready");
+                throw new FindMyBridgeNotReady();
+            }
             calls.push(`follow:${friendId}`);
             if (blockCommands) await new Promise<void>(resolve => (releaseCommand = resolve));
             if (startRejection) throw new FindMyLiveRejected(startRejection);
@@ -170,6 +192,7 @@ const fakeWorld = (
         openByHand: () => {
             running = true;
             ready = true;
+            withBridge = false;
         },
         /** Find My quit by hand on the Mac */
         quitByHand: () => {
@@ -710,4 +733,86 @@ test("a force quit that does not end Find My is not repeated every check", async
     await world.advance(120_000);
 
     assert.ok(world.forceQuits() <= 6, `${world.forceQuits()} force quits in two minutes`);
+});
+
+test("Find My's bridge still starting up does not hold up the map closing or new locations", async () => {
+    const world = fakeWorld({ bridgeReadyAfterMs: 15_000 });
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(3000);
+
+    world.touch("db");
+    await world.advance(1000);
+    assert.ok(world.published().includes("publish-friends"), "published as it landed");
+
+    mirror.setViewer("pixel", false);
+    await world.advance(2000);
+    assert.equal(world.isRunning(), false, "quit at once");
+    await world.advance(30_000);
+    assert.ok(!world.follows().some(call => call.startsWith("follow:")), "and nobody was followed after the map closed");
+});
+
+test("the selection is followed once Find My's bridge is ready, without a relaunch", async () => {
+    const world = fakeWorld({ bridgeReadyAfterMs: 15_000 });
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+
+    await world.advance(20_000);
+
+    assert.deepEqual(world.follows(), ["follow:friend-mom"]);
+    assert.equal(world.launches(), 1);
+});
+
+test("a map closed and reopened before Find My is up gets Find My again within seconds", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+    await world.advance(300);
+    mirror.setViewer("pixel", false);
+    await world.advance(3700);
+
+    mirror.setViewer("pixel", true);
+    await world.advance(5000);
+
+    assert.equal(world.launches(), 2);
+    assert.equal(world.isRunning(), true);
+});
+
+test("a Find My opened by hand while the server was down is not taken for ours", async () => {
+    const world = fakeWorld({ running: true, launchedEarlier: false });
+    new FindMyMirror(world.io);
+
+    await world.advance(120_000);
+
+    assert.equal(world.quits(), 0);
+    assert.equal(world.forceQuits(), 0);
+    assert.equal(world.isRunning(), true);
+});
+
+test("a Find My the user opened while ours never appeared is never force quit", async () => {
+    const world = fakeWorld({ neverStarts: true });
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+    await world.advance(5000);
+
+    world.openByHand();
+    await world.advance(60_000);
+
+    assert.equal(world.forceQuits(), 0);
+});
+
+test("a Find My whose bridge never becomes ready keeps the map updating, follows nobody, and is not relaunched", async () => {
+    const world = fakeWorld({ bridgeReadyAfterMs: Number.POSITIVE_INFINITY });
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(40_000);
+    const asked = world.calls.filter(call => call === "bridge-not-ready").length;
+
+    world.touch("db");
+    await world.advance(60_000);
+
+    assert.equal(world.launches(), 1);
+    assert.ok(world.published().includes("publish-friends"));
+    assert.equal(world.calls.filter(call => call === "bridge-not-ready").length, asked, "stopped asking");
+    assert.ok(asked <= 35, `asked ${asked} times`);
 });

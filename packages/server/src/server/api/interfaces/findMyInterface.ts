@@ -41,6 +41,7 @@ import { readFriendLocations } from "@server/api/lib/findmy/decrypt/localStorage
 import {
     findMyLiveLaunchArguments,
     FindMyLiveBridgeHost,
+    isFindMyLiveBridgeListening,
     requestFindMyLiveBridge
 } from "@server/api/lib/findmy/FindMyLiveBridgeHost";
 import { buildFindMyRoster, findMyFriendIdForHandle } from "@server/api/lib/findmy/FindMyFriendRoster";
@@ -103,9 +104,7 @@ export class FindMyInterface {
                 },
                 launchFindMy: environment => this.openFindMy(findMyLiveLaunchArguments(environment)),
                 request: requestFindMyLiveBridge,
-                wait: async ms => {
-                    await waitMs(ms);
-                }
+                isListening: isFindMyLiveBridgeListening
             },
             FileSystem.findMyLiveBridge,
             FileSystem.findMyLiveSocket
@@ -143,8 +142,8 @@ export class FindMyInterface {
                 }),
             // Hidden (-g -j) with the live-location bridge loaded; it idles until a friend is tapped
             launchFindMyHidden: () => this.getLiveBridge().launch(),
-            // A bridge socket outlives the server only along with the Find My it was launched into
-            launchedEarlier: () => fs.existsSync(FileSystem.findMyLiveSocket),
+            // Only a Find My launched with the bridge listens on its socket; a leftover socket file does not
+            isOurFindMyRunning: () => this.getLiveBridge().isOurs(),
             forgetLaunch: () => this.getLiveBridge().reset(),
             friendIdFor: handle => this.friendIdForHandle(handle),
             startLiveTracking: friendId => this.getLiveBridge().start(friendId),

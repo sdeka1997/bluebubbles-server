@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import { FindMyLiveRejected } from "./FindMyMirror";
+import { FindMyBridgeNotReady, FindMyLiveRejected } from "./FindMyMirror";
 
 export type FindMyLiveBridgeRequest = {
     token: string;
@@ -15,11 +15,10 @@ export type FindMyLiveBridgeHostIo = {
     removeSocket: (path: string) => void;
     launchFindMy: (environment: Record<string, string>) => Promise<void>;
     request: (socketPath: string, request: FindMyLiveBridgeRequest) => Promise<FindMyLiveBridgeReply>;
-    wait: (ms: number) => Promise<void>;
+    /** Whether a bridge accepts connections on the socket, which only a Find My launched with it does */
+    isListening: (socketPath: string) => Promise<boolean>;
 };
 
-const READY_RETRY_MS = 100;
-const READY_ATTEMPTS = 200;
 const REPLY_LIMIT = 8192;
 const REQUEST_TIMEOUT_MS = 2000;
 
@@ -39,6 +38,22 @@ export const findMyLiveLaunchArguments = (environment: Record<string, string>): 
     "-a",
     "FindMy"
 ];
+
+/** Socket errors meaning nothing listens there yet: Find My has not loaded the bridge yet, or has gone. */
+const NOT_LISTENING = new Set(["ENOENT", "ECONNREFUSED"]);
+
+/** Whether anything accepts a connection on the socket. Sends nothing, so needs no token. */
+export const isFindMyLiveBridgeListening = (socketPath: string): Promise<boolean> =>
+    new Promise(resolve => {
+        const socket = net.createConnection(socketPath);
+        const finish = (listening: boolean) => {
+            socket.destroy();
+            resolve(listening);
+        };
+        socket.setTimeout(REQUEST_TIMEOUT_MS, () => finish(false));
+        socket.once("connect", () => finish(true));
+        socket.once("error", () => finish(false));
+    });
 
 /** Sends one command and accepts one bounded newline-framed reply. */
 export const requestFindMyLiveBridge = (
@@ -107,8 +122,17 @@ export class FindMyLiveBridgeHost {
 
     async stop(): Promise<void> {
         if (!this.token) return;
-        const reply = await this.io.request(this.socketPath, { token: this.token, command: "stop" });
+        // A bridge not ready yet has not started following anyone
+        const reply = await this.send({ token: this.token, command: "stop" }).catch(error => {
+            if (error instanceof FindMyBridgeNotReady) return { status: "ok" as const };
+            throw error;
+        });
         if (reply.status === "error") throw new Error(reply.error ?? "Find My live bridge rejected stop");
+    }
+
+    /** Whether the Find My running is one launched with this bridge. */
+    isOurs(): Promise<boolean> {
+        return this.io.isListening(this.socketPath);
     }
 
     reset(): void {
@@ -116,26 +140,25 @@ export class FindMyLiveBridgeHost {
         this.io.removeSocket(this.socketPath);
     }
 
+    /** One request; the mirror's next check asks again while Find My is still starting. */
     async start(friendId: string): Promise<void> {
         if (!this.token) throw new Error("Find My live bridge has not launched");
-        const request: FindMyLiveBridgeRequest = { token: this.token, command: "start", id: friendId };
-        let lastError: unknown = new Error("Find My live bridge did not become ready");
-        for (let attempt = 0; attempt < READY_ATTEMPTS; attempt++) {
-            let reply: FindMyLiveBridgeReply | null = null;
-            try {
-                reply = await this.io.request(this.socketPath, request);
-            } catch (error) {
-                lastError = error;
-            }
-            if (reply?.status === "ok") return;
-            if (reply?.status === "error") {
-                // Find My's answer about this friend, which a retry won't change
-                if (reply.error && FRIEND_REJECTIONS.has(reply.error)) throw new FindMyLiveRejected(reply.error);
-                lastError = new Error(reply.error ?? "Find My live bridge rejected start");
-                if (reply.error !== "Find My is not ready") throw lastError;
-            }
-            if (attempt + 1 < READY_ATTEMPTS) await this.io.wait(READY_RETRY_MS);
+        const reply = await this.send({ token: this.token, command: "start", id: friendId });
+        if (reply.status === "ok") return;
+        // Find My's answer about this friend, which a retry won't change
+        if (reply.error && FRIEND_REJECTIONS.has(reply.error)) throw new FindMyLiveRejected(reply.error);
+        throw new Error(reply.error ?? "Find My live bridge rejected start");
+    }
+
+    private async send(request: FindMyLiveBridgeRequest): Promise<FindMyLiveBridgeReply> {
+        let reply: FindMyLiveBridgeReply;
+        try {
+            reply = await this.io.request(this.socketPath, request);
+        } catch (error: any) {
+            if (NOT_LISTENING.has(error?.code)) throw new FindMyBridgeNotReady();
+            throw error;
         }
-        throw lastError;
+        if (reply.status === "error" && reply.error === "Find My is not ready") throw new FindMyBridgeNotReady();
+        return reply;
     }
 }

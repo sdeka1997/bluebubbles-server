@@ -1,22 +1,24 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
     findMyLiveLaunchArguments,
+    isFindMyLiveBridgeListening,
     FindMyLiveBridgeHost,
     FindMyLiveBridgeHostIo,
     FindMyLiveBridgeRequest,
     requestFindMyLiveBridge
 } from "../src/server/api/lib/findmy/FindMyLiveBridgeHost";
-import { FindMyLiveRejected } from "../src/server/api/lib/findmy/FindMyMirror";
+import { FindMyBridgeNotReady, FindMyLiveRejected } from "../src/server/api/lib/findmy/FindMyMirror";
 
 const fakeIo = () => {
     const removed: string[] = [];
     const launches: Record<string, string>[] = [];
     const requests: FindMyLiveBridgeRequest[] = [];
-    const waits: number[] = [];
     const replies: Array<Error | { status: "ok" | "error"; error?: string }> = [];
     let tokenNumber = 0;
     const io: FindMyLiveBridgeHostIo = {
@@ -31,11 +33,9 @@ const fakeIo = () => {
             if (reply instanceof Error) throw reply;
             return reply;
         },
-        wait: async ms => {
-            waits.push(ms);
-        }
+        isListening: async () => true
     };
-    return { io, removed, launches, requests, replies, waits };
+    return { io, removed, launches, requests, replies };
 };
 
 test("redacts the fresh token from launch failures", async () => {
@@ -226,13 +226,11 @@ test("does not retry a permanent bridge rejection", async () => {
     });
 
     assert.equal(world.requests.length, 1);
-    assert.deepEqual(world.waits, []);
 });
 
-test("launches one token-authenticated host and starts the opaque Apple friend after it is ready", async () => {
+test("launches one token-authenticated host and starts the opaque Apple friend in one request", async () => {
     const world = fakeIo();
     const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
-    world.replies.push(new Error("ENOENT"), { status: "error", error: "Find My is not ready" }, { status: "ok" });
 
     await host.launch();
     await host.start("opaque-friend-id");
@@ -243,9 +241,59 @@ test("launches one token-authenticated host and starts the opaque Apple friend a
     assert.equal(world.launches[0].BBFM_LIVE_SOCKET, "/container/tmp/live.sock");
     assert.equal(world.launches[0].BBFM_LIVE_TOKEN.length, 32);
     assert.deepEqual(world.requests, [
-        { token: world.launches[0].BBFM_LIVE_TOKEN, command: "start", id: "opaque-friend-id" },
-        { token: world.launches[0].BBFM_LIVE_TOKEN, command: "start", id: "opaque-friend-id" },
         { token: world.launches[0].BBFM_LIVE_TOKEN, command: "start", id: "opaque-friend-id" }
     ]);
-    assert.deepEqual(world.waits, [100, 100]);
+});
+
+test("a bridge not ready yet, or not listening yet, says so without waiting", async () => {
+    for (const reply of [
+        { status: "error" as const, error: "Find My is not ready" },
+        Object.assign(new Error("connect ENOENT"), { code: "ENOENT" }),
+        Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })
+    ]) {
+        const world = fakeIo();
+        const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+        world.replies.push(reply);
+
+        await host.launch();
+        await assert.rejects(host.start("friend"), FindMyBridgeNotReady);
+        assert.equal(world.requests.length, 1, "the next check asks again");
+    }
+});
+
+test("stopping a bridge that is not ready yet succeeds: it follows nobody", async () => {
+    const world = fakeIo();
+    const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+    world.replies.push({ status: "error", error: "Find My is not ready" });
+
+    await host.launch();
+    await host.stop();
+});
+
+test("a bridge that does not answer in time is not taken as merely not ready", async () => {
+    const world = fakeIo();
+    const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+    world.replies.push(new Error("Find My live bridge timed out"));
+
+    await host.launch();
+    await assert.rejects(host.start("friend"), (error: unknown) => {
+        assert.ok(!(error instanceof FindMyBridgeNotReady));
+        return true;
+    });
+});
+
+test("only a socket something listens on counts as our Find My", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbfm-"));
+    const socketPath = path.join(dir, "live.sock");
+    try {
+        assert.equal(await isFindMyLiveBridgeListening(socketPath), false, "no socket");
+        const server = net.createServer(socket => socket.end());
+        await new Promise<void>(resolve => server.listen(socketPath, resolve));
+        assert.equal(await isFindMyLiveBridgeListening(socketPath), true, "a bridge listening");
+        await new Promise<void>(resolve => server.close(() => resolve()));
+        fs.writeFileSync(socketPath, "");
+        assert.equal(await isFindMyLiveBridgeListening(socketPath), false, "a leftover socket file");
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
