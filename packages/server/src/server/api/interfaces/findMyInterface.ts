@@ -60,16 +60,15 @@ export class FindMyInterface {
     }
 
     /**
-     * Publishes locations with a "City, ST" address in place of Apple's missing label.
+     * Publishes locations at once, then again with a "City, ST" address in place of Apple's missing
+     * label once the geocoder has one, so a live location is never held back for its address.
      * Locations the geocoder could not place keep their coordinates as the address.
      * Coordinates are geocoded only through Apple's on-device CLGeocoder via the packaged
      * helper. The cache drops a labelled copy whose coordinates have since been superseded.
      */
     private static async publishWithAddresses(locations: FindMyLocationItem[]): Promise<void> {
         const labeler = this.getLabeler();
-        const labeled = labeler
-            ? await labeler.labelWithin(locations, 3000)
-            : { current: locations, late: null };
+        const labeled = labeler ? await labeler.labelWithin(locations, 0) : { current: locations, late: null };
         const handler = new PrivateApiFindMyEventHandler();
         await handler.handleNewLocation(labeled.current);
         if (labeled.late) {

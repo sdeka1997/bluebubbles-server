@@ -3,7 +3,7 @@ import * as net from "net";
 import { PrivateApiEventHandler, EventData } from ".";
 import { FindMyLocationItem } from "@server/api/lib/findmy/types";
 import { NEW_FINDMY_LOCATION } from "@server/events";
-import { isEmpty, titleCase, waitMs } from "@server/helpers/utils";
+import { isEmpty, titleCase } from "@server/helpers/utils";
 import { Loggable } from "@server/lib/logging/Loggable";
 import { obfuscatedHandle } from "@server/utils/StringUtils";
 
@@ -28,8 +28,7 @@ export class PrivateApiFindMyEventHandler extends Loggable implements PrivateApi
         // Store the data in the cache
         const added = Server().findMyCache?.addAll(data);
 
-        // If there were items updated in the cache, emit them
-        let count = 0;
+        // Emit each update as it comes: the person followed live is often not first in the batch
         for (const item of added) {
             const handle = obfuscatedHandle(item?.handle);
             if (item?.coordinates[0] === 0 && item?.coordinates[1] === 0) {
@@ -41,12 +40,6 @@ export class PrivateApiFindMyEventHandler extends Loggable implements PrivateApi
             }
 
             await Server().emitMessage(NEW_FINDMY_LOCATION, item, "normal", false, true);
-            count++;
-
-            // Rate limit the emitted events
-            if (count < added.length) {
-                await waitMs(250);
-            }
         }
     }
 }
