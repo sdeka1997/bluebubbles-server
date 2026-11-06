@@ -46,6 +46,16 @@ export class FindMyBridgeNotReady extends Error {
     }
 }
 
+/**
+ * No reply in time: Find My's main thread, where every command runs, is busy. The command may
+ * still run once it is free, so who Apple is following is unknown until a later command is answered.
+ */
+export class FindMyBridgeTimedOut extends Error {
+    constructor() {
+        super("Find My live bridge timed out");
+    }
+}
+
 /** How long after Find My is up its bridge may stay not ready (it looks for Find My's manager once, 15 s in) */
 const BRIDGE_READY_LIMIT_MS = 30_000;
 
@@ -163,8 +173,8 @@ export class FindMyMirror {
     /** Whether this launch's bridge gave up finding Find My's manager; the map works, but follows nobody */
     private bridgeGaveUp = false;
     private lastAliveCheck = 0;
-    /** Who Apple is following in the running Find My, as last confirmed */
-    private followed: string | null = null;
+    /** Who Apple is following in the running Find My, as last confirmed; undefined when unknown */
+    private followed: string | null | undefined = null;
     /** The last selection looked up, so each one is looked up once per launch */
     private lookedUp: { handle: string; friendId: string | null } | null = null;
     /** A selection that could not be followed, and when it may be tried again */
@@ -258,8 +268,9 @@ export class FindMyMirror {
         if (!this.isOpen) {
             // A Find My opened by hand is the user's own
             this.up = false;
-            // Ownership is checked again before quitting: ours may have been swapped for the user's between checks
-            if (this.ours && this.quitAskedAt === null) this.ours = await this.io.isOurFindMyRunning();
+            // Ownership is checked before each quit request: ours may have been swapped for the user's between checks
+            const asking = this.quitAskedAt === null || now - this.quitAskedAt >= QUIT_WAIT_MS;
+            if (this.ours && asking) this.ours = await this.io.isOurFindMyRunning();
             if (this.ours) await this.quit("no map is open");
             else this.quittingSince = this.quitAskedAt = null;
             return this.ours;
@@ -383,7 +394,11 @@ export class FindMyMirror {
             else await this.io.startLiveTracking(friendId);
             this.followed = friendId;
         } catch (error) {
-            if (error instanceof FindMyBridgeNotReady) {
+            if (error instanceof FindMyBridgeTimedOut) {
+                // Find My is busy and may still run it later; the next check sends the selection again
+                this.followed = undefined;
+            }
+            if (error instanceof FindMyBridgeNotReady || error instanceof FindMyBridgeTimedOut) {
                 // One request per check, so the map keeps updating while Find My finishes starting
                 if (this.io.now() - this.upSince >= BRIDGE_READY_LIMIT_MS) {
                     this.bridgeGaveUp = true;

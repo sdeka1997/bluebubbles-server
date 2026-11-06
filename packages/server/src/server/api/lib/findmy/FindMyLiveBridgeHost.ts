@@ -1,6 +1,6 @@
 import net from "node:net";
 
-import { FindMyBridgeNotReady, FindMyLiveRejected } from "./FindMyMirror";
+import { FindMyBridgeNotReady, FindMyBridgeTimedOut, FindMyLiveRejected } from "./FindMyMirror";
 
 export type FindMyLiveBridgeRequest = {
     token: string;
@@ -38,13 +38,6 @@ export const findMyLiveLaunchArguments = (environment: Record<string, string>): 
     "-a",
     "FindMy"
 ];
-
-/** No reply in time: Find My's main thread, where every command runs, is busy. */
-export class FindMyBridgeTimedOut extends Error {
-    constructor() {
-        super("Find My live bridge timed out");
-    }
-}
 
 /** Socket errors meaning nothing listens there yet: Find My has not loaded the bridge yet, or has gone. */
 const NOT_LISTENING = new Set(["ENOENT", "ECONNREFUSED"]);
@@ -162,8 +155,8 @@ export class FindMyLiveBridgeHost {
         try {
             reply = await this.io.request(this.socketPath, request);
         } catch (error: any) {
-            // Not loaded yet, or busy: the next check asks again, under the mirror's time limit
-            if (NOT_LISTENING.has(error?.code) || error instanceof FindMyBridgeTimedOut) throw new FindMyBridgeNotReady();
+            // Not loaded yet: never sent, so the next check asks again. A timeout is passed on: it may still run
+            if (NOT_LISTENING.has(error?.code)) throw new FindMyBridgeNotReady();
             throw error;
         }
         if (reply.status === "error" && reply.error === "Find My is not ready") throw new FindMyBridgeNotReady();

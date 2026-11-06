@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
     FindMyBridgeNotReady,
+    FindMyBridgeTimedOut,
     FindMyLiveRejected,
     FindMyMirror,
     FindMyMirrorIo,
@@ -58,6 +59,26 @@ const fakeWorld = (
     /** Whether the running Find My is one launched with our bridge, as opposed to opened by hand */
     let withBridge = running && (options.launchedEarlier ?? false);
     let upAt: number | null = withBridge ? 0 : null;
+    /** Who Apple is actually following in the running Find My */
+    let appleFollows: string | null = null;
+    /** Commands that time out for the client but still run in Find My once its main thread is free */
+    let commandTimeouts = 0;
+    /** Commands waiting for Find My's main thread, run in the order sent, as the bridge serves them */
+    let queued: (() => void)[] = [];
+    const timesOut = (command: string, run: () => void) => {
+        if (commandTimeouts === 0 && queued.length === 0) return false;
+        if (commandTimeouts > 0) commandTimeouts--;
+        calls.push(`timeout:${command}`);
+        if (queued.length === 0) {
+            io.schedule(() => {
+                const pending = queued;
+                queued = [];
+                pending.forEach(fn => fn());
+            }, 3000);
+        }
+        queued.push(run);
+        return true;
+    };
     let releaseCommand: (() => void) | null = null;
     let blockCommands = false;
     let releasePublish: (() => void) | null = null;
@@ -121,7 +142,11 @@ const fakeWorld = (
                 calls.push("bridge-not-ready");
                 throw new FindMyBridgeNotReady();
             }
+            if (timesOut(`follow:${friendId}`, () => running && (appleFollows = friendId))) {
+                throw new FindMyBridgeTimedOut();
+            }
             calls.push(`follow:${friendId}`);
+            appleFollows = friendId;
             if (blockCommands) await new Promise<void>(resolve => (releaseCommand = resolve));
             if (startRejection) throw new FindMyLiveRejected(startRejection);
             if (commandFailures > 0) {
@@ -130,7 +155,9 @@ const fakeWorld = (
             }
         },
         stopLiveTracking: async () => {
+            if (timesOut("unfollow", () => (appleFollows = null))) throw new FindMyBridgeTimedOut();
             calls.push("unfollow");
+            appleFollows = null;
             if (commandFailures > 0) {
                 commandFailures--;
                 throw new Error("bridge unavailable");
@@ -199,6 +226,9 @@ const fakeWorld = (
             ready = true;
             withBridge = false;
         },
+        /** Who Apple is following in the running Find My */
+        appleFollows: () => (running ? appleFollows : null),
+        timeOutCommands: (count: number) => (commandTimeouts = count),
         /** The user quits our Find My and opens their own between two checks */
         swapForOwn: () => {
             withBridge = false;
@@ -842,5 +872,67 @@ test("our Find My swapped for the user's own between checks is not asked to quit
 
     assert.equal(world.quits(), 0);
     assert.equal(world.forceQuits(), 0);
+    assert.equal(world.isRunning(), true);
+});
+
+test("a start that timed out but ran later is undone when the person is deselected", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+    await world.advance(3000);
+
+    world.timeOutCommands(1);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(500);
+    mirror.setViewer("pixel", true);
+    await world.advance(10_000);
+
+    assert.equal(world.appleFollows(), null);
+    assert.equal(world.launches(), 1, "a busy Find My is not relaunched");
+});
+
+test("a start that timed out but ran later does not leave the wrong person followed", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(3000);
+    assert.equal(world.appleFollows(), "friend-mom");
+
+    world.timeOutCommands(1);
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(500);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(10_000);
+
+    assert.equal(world.appleFollows(), "friend-mom");
+});
+
+test("a stop that timed out is sent again until it is answered", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(3000);
+
+    world.timeOutCommands(2);
+    mirror.setViewer("pixel", true);
+    await world.advance(10_000);
+
+    assert.equal(world.appleFollows(), null);
+    assert.ok(world.follows().includes("unfollow"), "a stop was answered");
+});
+
+test("the user's own Find My opened just after ours quit is not asked to quit", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+    await world.advance(3000);
+
+    mirror.setViewer("pixel", false);
+    await world.advance(500);
+    assert.equal(world.quits(), 1);
+    world.openByHand();
+    await world.advance(60_000);
+
+    assert.equal(world.quits(), 1);
     assert.equal(world.isRunning(), true);
 });

@@ -7,14 +7,13 @@ import test from "node:test";
 
 import {
     findMyLiveLaunchArguments,
-    FindMyBridgeTimedOut,
     isFindMyLiveBridgeListening,
     FindMyLiveBridgeHost,
     FindMyLiveBridgeHostIo,
     FindMyLiveBridgeRequest,
     requestFindMyLiveBridge
 } from "../src/server/api/lib/findmy/FindMyLiveBridgeHost";
-import { FindMyBridgeNotReady, FindMyLiveRejected } from "../src/server/api/lib/findmy/FindMyMirror";
+import { FindMyBridgeNotReady, FindMyBridgeTimedOut, FindMyLiveRejected } from "../src/server/api/lib/findmy/FindMyMirror";
 
 const fakeIo = () => {
     const removed: string[] = [];
@@ -271,14 +270,20 @@ test("stopping a bridge that is not ready yet succeeds: it follows nobody", asyn
     await host.stop();
 });
 
-test("a bridge that does not answer in time is taken as busy, not broken", async () => {
+test("a command that does not answer in time may still run, so it is not taken as never sent", async () => {
     // Find My's main thread is busy, e.g. starting up or during the bridge's one-time manager scan
-    const world = fakeIo();
-    const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
-    world.replies.push(new FindMyBridgeTimedOut());
+    for (const send of [(host: FindMyLiveBridgeHost) => host.start("friend"), (host: FindMyLiveBridgeHost) => host.stop()]) {
+        const world = fakeIo();
+        const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+        world.replies.push(new FindMyBridgeTimedOut());
 
-    await host.launch();
-    await assert.rejects(host.start("friend"), FindMyBridgeNotReady);
+        await host.launch();
+        await assert.rejects(send(host), (error: unknown) => {
+            assert.ok(error instanceof FindMyBridgeTimedOut);
+            assert.ok(!(error instanceof FindMyBridgeNotReady));
+            return true;
+        });
+    }
 });
 
 test("the request itself reports a timeout as its own error", async () => {
