@@ -168,13 +168,17 @@ export class FindMyInterface {
     /** Follows one friend live by Apple's phone/email handle, as clicking them in Find My does; null stops. */
     static async setTrackedFriend(handle: string | null): Promise<boolean> {
         if (!isMinSonoma14_4) throw new Error("Selected-person live tracking requires macOS 14.4 or newer");
-        if (handle === null) return this.getMirror().follow(null);
+        // Handed over before the lookup, so a stop sent while it runs still comes after it
+        return this.getMirror().follow(handle === null ? null : this.friendIdForHandle(handle));
+    }
+
+    private static async friendIdForHandle(handle: string): Promise<string> {
         const key = await Server().findMyKeys.loadCacheKey("FMF");
         if (!key) throw new Error("The Find My FMF key is not imported");
         const roster = buildFindMyRoster(readFmfRosterData(key, FileSystem.findMyFmfCacheDir));
         const friendId = roster ? findMyFriendIdForHandle(roster, handle) : null;
         if (!friendId) throw new FindMyLiveTrackingNotFound();
-        return this.getMirror().follow(friendId);
+        return friendId;
     }
 
     /** A client's Find My map opened or closed; Find My runs while one is open. */

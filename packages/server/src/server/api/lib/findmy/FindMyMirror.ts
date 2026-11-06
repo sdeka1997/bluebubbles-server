@@ -37,7 +37,7 @@ const STEP_CHECK_MS = 100;
 /** Only for a Find My that never quits or never starts: the steps themselves take ~0.1 s. */
 const STEP_LIMIT_MS = 20 * 1000;
 
-/** How long to wait before asking a Find My that would not quit, with no map open, again. */
+/** How long to wait before asking a Find My that would not quit again. */
 const QUIT_RETRY_MS = 60 * 1000;
 
 const sameFile = (a: FileFingerprint | null, b: FileFingerprint | null): boolean =>
@@ -99,12 +99,13 @@ export class FindMyMirror {
     private readonly viewers = new Set<string>();
     /** Whether Find My was launched for the open maps and is up, so taps can reach it */
     private up = false;
-    /** The latest tap. An earlier tap still queued when another arrives is dropped. */
-    private latestTap: string | null = null;
+    /** Counts taps; a tap acts only while it is the latest one. */
+    private taps = 0;
     /** Every launch, quit and bridge command runs here, one at a time, in order */
     private queue: Promise<void> = Promise.resolve();
     private cancelCheck: (() => void) | null = null;
-    private cancelQuitRetry: (() => void) | null = null;
+    /** A launch or close waiting to try again on a Find My that would not quit */
+    private cancelRetry: (() => void) | null = null;
     private readonly friends: Publisher;
     private readonly devices: Publisher;
 
@@ -131,23 +132,25 @@ export class FindMyMirror {
     /**
      * Follows one friend live, as clicking them in Find My does; another friend switches, null
      * stops. Acts only on the Find My an open map is running and never launches one. Resolves
-     * true only when this friend is being followed and no later tap has replaced them.
+     * true only when this friend is being followed and no later tap has replaced them. The
+     * friend may still be being looked up; the tap keeps its place in line meanwhile.
      */
-    follow(friendId: string | null): Promise<boolean> {
-        this.latestTap = friendId;
+    async follow(friend: string | null | Promise<string>): Promise<boolean> {
+        const tap = ++this.taps;
+        const isLatest = () => tap === this.taps;
+        const friendId = await friend;
         return this.enqueue(async () => {
-            if (friendId !== this.latestTap || !this.up) return false;
+            if (!isLatest() || !this.up) return false;
             try {
                 if (friendId === null) await this.io.stopLiveTracking();
                 else await this.io.startLiveTracking(friendId);
             } catch (error) {
                 // Apple may still be following someone; a fresh Find My follows nobody
                 this.io.log(`Find My: live location command failed, relaunching: ${error}`);
-                if (this.latestTap === friendId) this.latestTap = null;
                 await this.launch();
                 return false;
             }
-            return friendId !== null && friendId === this.latestTap;
+            return friendId !== null && isLatest();
         });
     }
 
@@ -164,11 +167,12 @@ export class FindMyMirror {
     private async launch(): Promise<void> {
         if (!this.isOpen) return;
         this.stopWatching();
-        this.cancelQuitRetry?.();
-        this.cancelQuitRetry = null;
+        this.stopRetrying();
         this.up = false;
         if ((await this.io.isFindMyRunning()) && !(await this.quit())) {
-            this.io.log("Find My: did not quit, so it was not relaunched");
+            // It could still be following someone; nothing reaches it until it is relaunched
+            this.io.log("Find My: did not quit, so it was not relaunched; trying again later");
+            this.retryLater(() => this.launch());
             return;
         }
         // Writes from here on are new to the clients, which were just sent the current snapshot
@@ -189,8 +193,8 @@ export class FindMyMirror {
     private async close(): Promise<void> {
         if (this.isOpen) return;
         this.stopWatching();
+        this.stopRetrying();
         this.up = false;
-        this.latestTap = null;
         if (!(await this.io.isFindMyRunning())) return;
         if (await this.quit()) {
             this.io.log("Find My: map closed; quit Find My");
@@ -198,10 +202,19 @@ export class FindMyMirror {
         }
         // A Find My left running could still be following someone; keep trying while no map is open
         this.io.log("Find My: did not quit; trying again later");
-        this.cancelQuitRetry = this.io.schedule(() => {
-            this.cancelQuitRetry = null;
-            void this.enqueue(() => this.close());
+        this.retryLater(() => this.close());
+    }
+
+    private retryLater(operation: () => Promise<void>): void {
+        this.cancelRetry = this.io.schedule(() => {
+            this.cancelRetry = null;
+            void this.enqueue(operation);
         }, QUIT_RETRY_MS);
+    }
+
+    private stopRetrying(): void {
+        this.cancelRetry?.();
+        this.cancelRetry = null;
     }
 
     /**
