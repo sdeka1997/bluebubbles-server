@@ -199,6 +199,20 @@ test("stops only an active host, resets its socket, and uses a fresh token on re
     assert.notEqual(world.launches[1].BBFM_LIVE_TOKEN, firstToken);
 });
 
+test("a rejection about the launch itself is not taken as Find My's answer about the friend", async () => {
+    for (const error of ["unauthorized", "invalid request", "unsupported command"]) {
+        const world = fakeIo();
+        const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
+        world.replies.push({ status: "error", error });
+
+        await host.launch();
+        await assert.rejects(host.start("friend"), (rejection: unknown) => {
+            assert.ok(!(rejection instanceof FindMyLiveRejected), error);
+            return true;
+        });
+    }
+});
+
 test("does not retry a permanent bridge rejection", async () => {
     const world = fakeIo();
     const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");

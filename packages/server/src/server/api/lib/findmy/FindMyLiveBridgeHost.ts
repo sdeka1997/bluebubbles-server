@@ -23,6 +23,9 @@ const READY_ATTEMPTS = 200;
 const REPLY_LIMIT = 8192;
 const REQUEST_TIMEOUT_MS = 2000;
 
+/** The bridge's answers about the friend itself; any other error is about the launch. */
+const FRIEND_REJECTIONS = new Set(["friend not found", "friend id is not unique"]);
+
 /** Explicit argv for `open`; no token or path is interpolated through a shell. */
 export const findMyLiveLaunchArguments = (environment: Record<string, string>): string[] => [
     "-g",
@@ -126,11 +129,10 @@ export class FindMyLiveBridgeHost {
             }
             if (reply?.status === "ok") return;
             if (reply?.status === "error") {
-                // Anything but "not ready" is Find My's answer about this friend, which a retry won't change
-                if (reply.error !== "Find My is not ready") {
-                    throw new FindMyLiveRejected(reply.error ?? "Find My live bridge rejected start");
-                }
-                lastError = new Error(reply.error);
+                // Find My's answer about this friend, which a retry won't change
+                if (reply.error && FRIEND_REJECTIONS.has(reply.error)) throw new FindMyLiveRejected(reply.error);
+                lastError = new Error(reply.error ?? "Find My live bridge rejected start");
+                if (reply.error !== "Find My is not ready") throw lastError;
             }
             if (attempt + 1 < READY_ATTEMPTS) await this.io.wait(READY_RETRY_MS);
         }

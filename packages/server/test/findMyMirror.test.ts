@@ -51,6 +51,7 @@ const fakeWorld = (
     let lookupFailures = 0;
     let startRejection: string | null = null;
     let neverReady = options.neverReady ?? false;
+    let forceQuitsIgnored = false;
     let releaseCommand: (() => void) | null = null;
     let blockCommands = false;
     let releasePublish: (() => void) | null = null;
@@ -86,6 +87,7 @@ const fakeWorld = (
         },
         forceQuitFindMy: async () => {
             calls.push("force-quit");
+            if (forceQuitsIgnored) return;
             running = false;
             ready = false;
         },
@@ -185,6 +187,7 @@ const fakeWorld = (
         addToRoster: (handle: string, friendId: string) => roster.set(handle, friendId),
         removeFromRoster: (handle: string) => roster.delete(handle),
         forceQuits: () => calls.filter(call => call === "force-quit").length,
+        ignoreForceQuits: () => (forceQuitsIgnored = true),
         osascripts: () => osascripts,
         refuseQuits: (count: number) => (refusals = count),
         startWorking: () => (neverStarts = false),
@@ -663,4 +666,48 @@ test("the screen message names a selected person only by a usable handle", () =>
     assert.equal(findMyScreenHandle({ open: true, handle: 7 }), null);
     assert.equal(findMyScreenHandle({ open: true, handle: "a".repeat(321) }), null);
     assert.equal(findMyScreenHandle(null), null);
+});
+
+test("an earlier wait on a Find My that would not quit does not count against the user's own", async () => {
+    const world = fakeWorld();
+    world.openByHand();
+    const mirror = new FindMyMirror(world.io);
+    world.refuseQuits(5);
+
+    mirror.setViewer("pixel", true);
+    await world.advance(500);
+    mirror.setViewer("pixel", false);
+    await world.advance(3_600_000);
+
+    world.refuseQuits(0);
+    mirror.setViewer("pixel", true);
+    await world.advance(3000);
+
+    assert.equal(world.forceQuits(), 0, "asked to quit first, and it did");
+    assert.ok(world.quits() >= 2);
+});
+
+test("a Find My opened by hand that will not quit is never force quit", async () => {
+    const world = fakeWorld();
+    world.openByHand();
+    const mirror = new FindMyMirror(world.io);
+    world.refuseQuits(1_000_000);
+
+    mirror.setViewer("pixel", true);
+    await world.advance(120_000);
+
+    assert.equal(world.forceQuits(), 0, "it may hold the user's unsaved work");
+    assert.equal(world.launches(), 0);
+    assert.ok(world.logs.some(line => /not quit/.test(line)));
+});
+
+test("a force quit that does not end Find My is not repeated every check", async () => {
+    const world = fakeWorld({ neverReady: true });
+    world.ignoreForceQuits();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+
+    await world.advance(120_000);
+
+    assert.ok(world.forceQuits() <= 6, `${world.forceQuits()} force quits in two minutes`);
 });

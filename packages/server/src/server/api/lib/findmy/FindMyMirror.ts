@@ -48,8 +48,11 @@ const ALIVE_CHECK_MS = 5000;
 /** How long a launched Find My may take to start before it is force quit and launched again. It takes ~1 s. */
 const START_LIMIT_MS = 20 * 1000;
 
-/** How long Find My may refuse to quit before it is force quit. A quit takes ~0.2 s. */
+/** How long a Find My this server launched may refuse to quit before it is force quit. A quit takes ~0.2 s. */
 const QUIT_LIMIT_MS = 20 * 1000;
+
+/** How long a force quit is given to end Find My before it is tried again. */
+const FORCE_QUIT_WAIT_MS = 20 * 1000;
 
 /** How long a selection missing from the roster, or not looked up, waits to be looked up again. Apple adds friends within seconds. */
 const RETRY_LOOKUP_MS = 10 * 1000;
@@ -139,8 +142,9 @@ export class FindMyMirror {
     private launchedFor: number | null = null;
     private startingSince: number | null = null;
     private quitAskedAt: number | null = null;
-    /** When the running Find My was first asked to quit, so one that never goes can be force quit */
+    /** When our Find My was first asked to quit, so one that never goes can be force quit */
     private quittingSince: number | null = null;
+    private forceQuitAt: number | null = null;
     /** Whether Find My is up for the open maps: started, with its files being watched */
     private up = false;
     private lastAliveCheck = 0;
@@ -222,6 +226,7 @@ export class FindMyMirror {
             this.up = false;
             this.quitAskedAt = null;
             this.quittingSince = null;
+            this.forceQuitAt = null;
             // Still starting: once it is up it is quit or used, as the maps then need
             if (this.startingSince !== null && now - this.startingSince < START_LIMIT_MS) return true;
             if (this.ours) this.io.forgetLaunch();
@@ -236,6 +241,7 @@ export class FindMyMirror {
             // A Find My opened by hand is the user's own
             this.up = false;
             if (this.ours) await this.quit("no map is open");
+            else this.quittingSince = this.quitAskedAt = null;
             return this.ours;
         }
 
@@ -257,6 +263,7 @@ export class FindMyMirror {
             this.friends.baseline();
             this.devices.baseline();
             this.startingSince = null;
+            this.quittingSince = this.quitAskedAt = null;
             this.up = true;
             this.log("Find My: open for the map; publishing locations as it writes them");
         }
@@ -285,7 +292,11 @@ export class FindMyMirror {
     private async quit(reason: string): Promise<void> {
         const now = this.io.now();
         this.quittingSince ??= now;
-        if (now - this.quittingSince >= QUIT_LIMIT_MS) return this.forceQuit(`it did not quit, as ${reason}`);
+        if (now - this.quittingSince >= QUIT_LIMIT_MS) {
+            // The user's own Find My may hold work of theirs, so it is only ever asked
+            if (this.ours) return this.forceQuit(`it did not quit, as ${reason}`);
+            this.log("Find My: the Find My opened on this Mac did not quit, so the map cannot use it yet");
+        }
         if (this.quitAskedAt !== null && now - this.quitAskedAt < QUIT_WAIT_MS) return;
         if (!(await this.io.isFindMyReady())) return;
         try {
@@ -299,6 +310,9 @@ export class FindMyMirror {
 
     /** Ends Find My at once; a later check sees it gone, and relaunches it if a map is open. */
     private async forceQuit(reason: string): Promise<void> {
+        const now = this.io.now();
+        if (this.forceQuitAt !== null && now - this.forceQuitAt < FORCE_QUIT_WAIT_MS) return;
+        this.forceQuitAt = now;
         try {
             await this.io.forceQuitFindMy();
             this.log(`Find My: force quit it, as ${reason}`);
