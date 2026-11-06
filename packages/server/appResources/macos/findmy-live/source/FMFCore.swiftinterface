@@ -1,0 +1,13 @@
+// swift-interface-format-version: 1.0
+// swift-compiler-version: Apple Swift version 6.0
+// swift-module-flags: -target x86_64-apple-macosx15.0 -enable-library-evolution -module-name FMFCore
+import Swift
+public struct FMFFriend {
+  public var name: Swift.String { get }
+  public var identifier: Swift.String { get }
+}
+open class FMFManager {
+  public var friends: [FMFCore.FMFFriend] { get }
+  public func startLiveLocation(for friend: FMFCore.FMFFriend, clientApp: Swift.String?)
+  public func stopLiveLocation(for friend: FMFCore.FMFFriend)
+}
