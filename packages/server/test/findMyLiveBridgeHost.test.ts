@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
     findMyLiveLaunchArguments,
+    FindMyBridgeTimedOut,
     isFindMyLiveBridgeListening,
     FindMyLiveBridgeHost,
     FindMyLiveBridgeHostIo,
@@ -270,16 +271,27 @@ test("stopping a bridge that is not ready yet succeeds: it follows nobody", asyn
     await host.stop();
 });
 
-test("a bridge that does not answer in time is not taken as merely not ready", async () => {
+test("a bridge that does not answer in time is taken as busy, not broken", async () => {
+    // Find My's main thread is busy, e.g. starting up or during the bridge's one-time manager scan
     const world = fakeIo();
     const host = new FindMyLiveBridgeHost(world.io, "/resources/Bridge.dylib", "/container/tmp/live.sock");
-    world.replies.push(new Error("Find My live bridge timed out"));
+    world.replies.push(new FindMyBridgeTimedOut());
 
     await host.launch();
-    await assert.rejects(host.start("friend"), (error: unknown) => {
-        assert.ok(!(error instanceof FindMyBridgeNotReady));
-        return true;
-    });
+    await assert.rejects(host.start("friend"), FindMyBridgeNotReady);
+});
+
+test("the request itself reports a timeout as its own error", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbfm-"));
+    const socketPath = path.join(dir, "live.sock");
+    const server = net.createServer(() => undefined);
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    try {
+        await assert.rejects(requestFindMyLiveBridge(socketPath, { token: "t", command: "stop" }), FindMyBridgeTimedOut);
+    } finally {
+        server.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test("only a socket something listens on counts as our Find My", async () => {

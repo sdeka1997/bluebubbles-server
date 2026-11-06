@@ -112,6 +112,11 @@ const fakeWorld = (
         isOurFindMyRunning: async () => running && withBridge,
         forgetLaunch: () => calls.push("forget"),
         startLiveTracking: async friendId => {
+            if (running && !withBridge) {
+                // The user's own Find My: nothing listens on our socket
+                calls.push("bridge-not-ready");
+                throw new FindMyBridgeNotReady();
+            }
             if (upAt === null || now - upAt < (options.bridgeReadyAfterMs ?? 0)) {
                 calls.push("bridge-not-ready");
                 throw new FindMyBridgeNotReady();
@@ -193,6 +198,11 @@ const fakeWorld = (
             running = true;
             ready = true;
             withBridge = false;
+        },
+        /** The user quits our Find My and opens their own between two checks */
+        swapForOwn: () => {
+            withBridge = false;
+            upAt = null;
         },
         /** Find My quit by hand on the Mac */
         quitByHand: () => {
@@ -815,4 +825,22 @@ test("a Find My whose bridge never becomes ready keeps the map updating, follows
     assert.ok(world.published().includes("publish-friends"));
     assert.equal(world.calls.filter(call => call === "bridge-not-ready").length, asked, "stopped asking");
     assert.ok(asked <= 35, `asked ${asked} times`);
+});
+
+test("our Find My swapped for the user's own between checks is not asked to quit when the map closes", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(3000);
+    assert.deepEqual(world.follows(), ["follow:friend-mom"]);
+
+    world.swapForOwn();
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(1000);
+    mirror.setViewer("pixel", false);
+    await world.advance(60_000);
+
+    assert.equal(world.quits(), 0);
+    assert.equal(world.forceQuits(), 0);
+    assert.equal(world.isRunning(), true);
 });

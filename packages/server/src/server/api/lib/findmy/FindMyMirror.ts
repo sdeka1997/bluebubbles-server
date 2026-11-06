@@ -258,6 +258,8 @@ export class FindMyMirror {
         if (!this.isOpen) {
             // A Find My opened by hand is the user's own
             this.up = false;
+            // Ownership is checked again before quitting: ours may have been swapped for the user's between checks
+            if (this.ours && this.quitAskedAt === null) this.ours = await this.io.isOurFindMyRunning();
             if (this.ours) await this.quit("no map is open");
             else this.quittingSince = this.quitAskedAt = null;
             return this.ours;
