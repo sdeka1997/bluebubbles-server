@@ -54,9 +54,6 @@ const fakeBackend = (overrides: Partial<EncryptedFriendsBackend> = {}) => {
         },
         cache,
         label: async items => items.map(item => ({ ...item, short_address: "Dallas, TX", long_address: "Dallas, TX" })),
-        startLiveRefresh: force => {
-            calls.push(force ? "start-live-refresh-forced" : "start-live-refresh");
-        },
         // Mirrors PrivateApiFindMyEventHandler.handleNewLocation: store, then emit only what changed
         publish: async items => {
             calls.push("publish");
@@ -96,12 +93,12 @@ test("missing LocalStorage or FMF key returns the current cache without launchin
     }
 });
 
-test("starts a live Find My refresh, then returns freshly decrypted, labelled friends without waiting on it", async () => {
+test("returns freshly decrypted, labelled friends; Find My itself runs only while a map is open", async () => {
     const { backend, calls } = fakeBackend();
 
     const result = await refreshEncryptedFriends(backend);
 
-    assert.deepEqual(calls, ["start-live-refresh", "read-roster", "read-locations"]);
+    assert.deepEqual(calls, ["read-roster", "read-locations"]);
     const dad = result.find(item => item.handle === "dad@example.com");
     assert.deepEqual(dad.coordinates, [33.1, -96.6]);
     assert.equal(dad.title, "Dad");
@@ -111,14 +108,6 @@ test("starts a live Find My refresh, then returns freshly decrypted, labelled fr
     const mom = result.find(item => item.title === "Mom");
     assert.ok(mom, "Mom is listed");
     assert.deepEqual(mom.coordinates, [0, 0]);
-});
-
-test("a forced friends refresh asks the live refresh to relaunch Find My regardless of the cooldown", async () => {
-    const { backend, calls } = fakeBackend();
-
-    await refreshEncryptedFriends(backend, true, true);
-
-    assert.deepEqual(calls, ["start-live-refresh-forced", "read-roster", "read-locations"]);
 });
 
 test("a later read publishes only the friends whose location changed", async () => {
@@ -147,19 +136,9 @@ test("reading friends without the keys returns nothing and launches nothing", as
     assert.match(logs.join("\n"), /FMF key/);
 });
 
-test("openFindMyApp=false reads the encrypted cache without starting a refresh", async () => {
-    const { backend, calls } = fakeBackend();
-
-    const result = await refreshEncryptedFriends(backend, false);
-    await settle();
-
-    assert.deepEqual(calls, ["read-roster", "read-locations"]);
-    assert.ok(result.some(item => item.handle === "dad@example.com" && item.coordinates[0] === 33.1));
-});
-
 test("a transient decrypt or read failure keeps serving the last good cache", async () => {
     const { backend, cache, emitted, logs } = fakeBackend();
-    await refreshEncryptedFriends(backend, false);
+    await refreshEncryptedFriends(backend);
     const lastGood = cache.getAll();
     assert.deepEqual(cache.get("dad@example.com").coordinates, [33.1, -96.6]);
 

@@ -158,28 +158,17 @@ test("null entries inside the decrypted Items or ItemGroups are skipped", () =>
         }
     ));
 
-test("devices on 14.4+: a missing FMIP key returns null without starting a refresh", async () => {
-    const calls: string[] = [];
+test("devices on 14.4+: a missing FMIP key returns null; reading never launches Find My", async () => {
     const logs: string[] = [];
     const backend = (fmipKey: Buffer | null, dir: string): EncryptedDevicesBackend => ({
         loadFmipKey: async () => fmipKey,
         findMyDir: dir,
-        startLiveRefresh: force => {
-            calls.push(force ? "start-live-refresh-forced" : "start-live-refresh");
-        },
         log: message => logs.push(message)
     });
 
     await withFindMyDir({ "Devices.data": sealedCacheFile([IPHONE]) }, async dir => {
-        assert.equal(await getEncryptedDevices(backend(null, dir), true), null);
-        assert.deepEqual(calls, []);
+        assert.equal(await getEncryptedDevices(backend(null, dir)), null);
         assert.match(logs.join("\n"), /FMIP key/);
-
         assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir)), [IPHONE]);
-        assert.deepEqual(calls, []);
-        assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir), true), [IPHONE]);
-        assert.deepEqual(calls, ["start-live-refresh"], "a refresh answers at once; changes follow as Find My writes them");
-        assert.deepEqual(await getEncryptedDevices(backend(CACHE_KEY, dir), true, true), [IPHONE]);
-        assert.deepEqual(calls, ["start-live-refresh", "start-live-refresh-forced"], "a forced refresh is passed on");
     });
 });

@@ -92,6 +92,23 @@ export class FileSystem {
 
     public static findMyReverseGeocoder = path.join(FileSystem.resources, "macos", "tools", "findmy-geocoder.js");
 
+    public static findMyLiveBridge = path.join(
+        FileSystem.resources,
+        "macos",
+        "findmy-live",
+        "BlueBubblesFindMyBridge.dylib"
+    );
+
+    public static findMyLiveSocket = path.join(
+        userHomeDir(),
+        "Library",
+        "Containers",
+        "com.apple.findmy",
+        "Data",
+        "tmp",
+        "bluebubbles-findmy-live.sock"
+    );
+
     public static addressBookFile = `${FileSystem.contactsDir}/AddressBook.vcf`;
 
     public static contactsFile = `${FileSystem.contactsDir}/contacts.vcf`;

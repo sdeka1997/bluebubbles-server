@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildFindMyRoster, normalizeFindMyHandle } from "../src/server/api/lib/findmy/FindMyFriendRoster";
+import {
+    buildFindMyRoster,
+    findMyFriendIdForHandle,
+    normalizeFindMyHandle
+} from "../src/server/api/lib/findmy/FindMyFriendRoster";
 
 const fixture = {
     myInfo: { emails: ["owner@example.com"] },
@@ -46,6 +50,15 @@ const fixture = {
     ],
     preferences: { favorites: [{ id: "person-may", order: 1 }, { id: "person-dad", order: 0 }] }
 };
+
+test("resolves only an Apple handle to the opaque friend id, never a display name", () => {
+    const roster = buildFindMyRoster(fixture)!;
+
+    assert.equal(findMyFriendIdForHandle(roster, " DAD-CURRENT@EXAMPLE.COM "), "person-dad");
+    assert.equal(findMyFriendIdForHandle(roster, "+1 555 555 0123"), "person-phone");
+    assert.equal(findMyFriendIdForHandle(roster, "Dad"), null);
+    assert.equal(findMyFriendIdForHandle(roster, ""), null);
+});
 
 test("builds one authoritative identity from all of a friend's Apple handles", () => {
     const roster = buildFindMyRoster(fixture)!;

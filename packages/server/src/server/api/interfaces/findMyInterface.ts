@@ -2,6 +2,7 @@ import { Server } from "@server";
 import path from "path";
 import fs from "fs";
 import child_process from "child_process";
+import { randomBytes } from "crypto";
 import { FileSystem } from "@server/fileSystem";
 import { isMinBigSur, isMinSonoma, isMinSonoma14_4 } from "@server/env";
 import { checkPrivateApiStatus, waitMs } from "@server/helpers/utils";
@@ -12,12 +13,7 @@ import {
     hideFindMyFriends,
     isFindMyFriendsRunning
 } from "../apple/scripts";
-import {
-    FileFingerprint,
-    FindMyLiveRefresh,
-    FindMyRound,
-    NO_FIND_MY_ROUND
-} from "@server/api/lib/findmy/FindMyLiveRefresh";
+import { FileFingerprint, FindMyMirror } from "@server/api/lib/findmy/FindMyMirror";
 import { FindMyDevice, FindMyItem, FindMyLocationItem } from "@server/api/lib/findmy/types";
 import { transformFindMyItemToDevice } from "@server/api/lib/findmy/utils";
 import {
@@ -39,9 +35,16 @@ import {
     refreshEncryptedFriends,
     selectFindMyBackend
 } from "@server/api/lib/findmy/FindMyEncryptedBackend";
-import { FIND_MY_DEVICES_UPDATED, FIND_MY_ROUND } from "@server/events";
+import { FIND_MY_DEVICES_UPDATED } from "@server/events";
 import { readFmfRosterData } from "@server/api/lib/findmy/decrypt/fmfReader";
 import { readFriendLocations } from "@server/api/lib/findmy/decrypt/localStorageReader";
+import {
+    findMyLiveLaunchArguments,
+    FindMyLiveBridgeHost,
+    requestFindMyLiveBridge
+} from "@server/api/lib/findmy/FindMyLiveBridgeHost";
+import { buildFindMyRoster, findMyFriendIdForHandle } from "@server/api/lib/findmy/FindMyFriendRoster";
+import { FindMyLiveTrackingNotFound } from "@server/api/lib/findmy/FindMyLiveTrackingRequest";
 
 export class FindMyInterface {
     // Shared so the coordinate-cell cache survives between refreshes. Created lazily because
@@ -78,14 +81,45 @@ export class FindMyInterface {
         return Server().findMyCache.getAll();
     }
 
-    private static liveRefresh: FindMyLiveRefresh | null = null;
+    private static mirror: FindMyMirror | null = null;
+    private static liveBridge: FindMyLiveBridgeHost | null = null;
+
+    private static openFindMy(args: string[]): Promise<void> {
+        return new Promise((resolve, reject) => {
+            child_process.execFile("/usr/bin/open", args, error => (error ? reject(error) : resolve()));
+        });
+    }
+
+    private static getLiveBridge(): FindMyLiveBridgeHost {
+        if (this.liveBridge) return this.liveBridge;
+        this.liveBridge = new FindMyLiveBridgeHost(
+            {
+                randomToken: () => randomBytes(32).toString("hex"),
+                removeSocket: socketPath => {
+                    try {
+                        fs.unlinkSync(socketPath);
+                    } catch (error: any) {
+                        if (error?.code !== "ENOENT") throw error;
+                    }
+                },
+                launchFindMy: environment => this.openFindMy(findMyLiveLaunchArguments(environment)),
+                request: requestFindMyLiveBridge,
+                wait: async ms => {
+                    await waitMs(ms);
+                }
+            },
+            FileSystem.findMyLiveBridge,
+            FileSystem.findMyLiveSocket
+        );
+        return this.liveBridge;
+    }
 
     /**
-     * The one live refresh for macOS 14.4+: relaunches Find My hidden while a Find My screen is
-     * open, publishes friends and devices as Find My writes them, and quits it when the last closes.
+     * The Find My mirror for macOS 14.4+: Find My runs while a client's map is open, publishing
+     * friends and devices as it writes them, and quits when the last map closes.
      */
-    private static getLiveRefresh(): FindMyLiveRefresh {
-        if (this.liveRefresh) return this.liveRefresh;
+    private static getMirror(): FindMyMirror {
+        if (this.mirror) return this.mirror;
         const stat = (file: string): FileFingerprint | null => {
             try {
                 const { size, mtimeMs, ino } = fs.statSync(file);
@@ -95,17 +129,16 @@ export class FindMyInterface {
             }
         };
         const friendsBackend = this.encryptedFriendsBackend();
-        this.liveRefresh = new FindMyLiveRefresh({
+        this.mirror = new FindMyMirror({
             isFindMyRunning: () => this.isFindMyRunning(),
             isFindMyReady: () => this.isFindMyReady(),
             quitFindMy: async () => {
                 await FileSystem.executeAppleScript(quitFindMyFriends());
             },
-            launchFindMyHidden: async () => {
-                // -g: don't bring it forward; -j: launch hidden. Measured: a hidden launch makes
-                // Find My locate people as well as a foreground one does.
-                await FileSystem.execShellCommand("/usr/bin/open -g -j -a FindMy");
-            },
+            // Hidden (-g -j) with the live-location bridge loaded; it idles until a friend is tapped
+            launchFindMyHidden: () => this.getLiveBridge().launch(),
+            startLiveTracking: friendId => this.getLiveBridge().start(friendId),
+            stopLiveTracking: () => this.getLiveBridge().stop(),
             friendFiles: () => {
                 const db = FileSystem.findMyLocalStorageDbPath;
                 return [db, `${db}-wal`];
@@ -122,11 +155,6 @@ export class FindMyInterface {
                 const devices = readEncryptedDevices(key, FileSystem.findMyDir);
                 if (devices) await Server().emitMessage(FIND_MY_DEVICES_UPDATED, devices, "normal", false, true);
             },
-            friendLocations: () =>
-                Server()
-                    .findMyCache.getAll()
-                    .map(friend => ({ id: friend.handle ?? "", at: friend.last_updated ?? 0 })),
-            announceRound: round => void Server().emitMessage(FIND_MY_ROUND, round, "normal", false, true),
             schedule: (fn, ms) => {
                 const timer = setTimeout(fn, ms);
                 return () => clearTimeout(timer);
@@ -134,18 +162,25 @@ export class FindMyInterface {
             now: () => Date.now(),
             log: message => Server().logger.info(message)
         });
-        return this.liveRefresh;
+        return this.mirror;
     }
 
-    /** The current round: its id, whether new locations are on their way, since when (ms), and how it ended. */
-    static get round(): FindMyRound {
-        return this.liveRefresh?.round ?? NO_FIND_MY_ROUND;
+    /** Follows one friend live by Apple's phone/email handle, as clicking them in Find My does; null stops. */
+    static async setTrackedFriend(handle: string | null): Promise<boolean> {
+        if (!isMinSonoma14_4) throw new Error("Selected-person live tracking requires macOS 14.4 or newer");
+        if (handle === null) return this.getMirror().follow(null);
+        const key = await Server().findMyKeys.loadCacheKey("FMF");
+        if (!key) throw new Error("The Find My FMF key is not imported");
+        const roster = buildFindMyRoster(readFmfRosterData(key, FileSystem.findMyFmfCacheDir));
+        const friendId = roster ? findMyFriendIdForHandle(roster, handle) : null;
+        if (!friendId) throw new FindMyLiveTrackingNotFound();
+        return this.getMirror().follow(friendId);
     }
 
-    /** A client's Find My screen opened or closed; Find My runs while one is open. */
+    /** A client's Find My map opened or closed; Find My runs while one is open. */
     static setFindMyViewer(clientId: string, open: boolean): void {
         if (!isMinSonoma14_4) return;
-        this.getLiveRefresh().setViewer(clientId, open);
+        this.getMirror().setViewer(clientId, open);
     }
 
     /**
@@ -160,7 +195,6 @@ export class FindMyInterface {
             readRosterData: key => readFmfRosterData(key, FileSystem.findMyFmfCacheDir),
             readLocations: key => readFriendLocations(key, FileSystem.findMyLocalStorageDbPath),
             cache: Server().findMyCache,
-            startLiveRefresh: force => void this.getLiveRefresh().start({ force }),
             label: async locations => {
                 // Wait briefly for cities so the response carries them; slower ones follow over the socket
                 const labeler = this.getLabeler();
@@ -182,7 +216,6 @@ export class FindMyInterface {
         return {
             loadFmipKey: () => Server().findMyKeys.loadCacheKey("FMIP"),
             findMyDir: FileSystem.findMyDir,
-            startLiveRefresh: force => void this.getLiveRefresh().start({ force }),
             log: message => Server().logger.info(message)
         };
     }
@@ -240,9 +273,10 @@ export class FindMyInterface {
         }
     }
 
-    static async refreshDevices(force = false): Promise<Array<FindMyDevice> | null> {
+    static async refreshDevices(): Promise<Array<FindMyDevice> | null> {
         return await selectFindMyBackend(isMinSonoma14_4, {
-            encrypted: () => getEncryptedDevices(this.encryptedDevicesBackend(), true, force),
+            // Find My runs while a map is open; this reads what it has written so far
+            encrypted: () => getEncryptedDevices(this.encryptedDevicesBackend()),
             legacy: async () => {
                 // Can't use the Private API to refresh devices yet
                 await this.refreshLocationsAccessibility();
@@ -251,9 +285,10 @@ export class FindMyInterface {
         });
     }
 
-    static async refreshFriends(openFindMyApp = true, force = false): Promise<FindMyLocationItem[]> {
+    static async refreshFriends(openFindMyApp = true): Promise<FindMyLocationItem[]> {
         return await selectFindMyBackend(isMinSonoma14_4, {
-            encrypted: () => refreshEncryptedFriends(this.encryptedFriendsBackend(), openFindMyApp, force),
+            // Find My runs while a map is open; this reads what it has written so far
+            encrypted: () => refreshEncryptedFriends(this.encryptedFriendsBackend()),
             legacy: () => this.refreshFriendsBefore14_4(openFindMyApp)
         });
     }

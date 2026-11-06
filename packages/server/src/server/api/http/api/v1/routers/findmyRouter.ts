@@ -1,27 +1,24 @@
 import { Next } from "koa";
 import { RouterContext } from "koa-router";
 import { Success } from "../responses/success";
-import { ServerError } from "../responses/errors";
+import { BadRequest, NotFound, ServerError } from "../responses/errors";
 import { FindMyInterface } from "@server/api/interfaces/findMyInterface";
-
-/** `?force=true`: relaunch Find My and start a new round even during one (the client's refresh button). */
-const isForced = (ctx: RouterContext): boolean => ctx.request.query?.force === "true";
+import {
+    findMyLiveTrackingFailureStatus,
+    findMyLiveTrackingHandle
+} from "@server/api/lib/findmy/FindMyLiveTrackingRequest";
 
 /**
- * Refresh answers carry the round as metadata: `id` (one per round), `collecting` (new locations
- * follow over the socket), `startedAt` (ms; a location newer than this is from the round) and
- * `endedBy` (why it stopped: everyone, quiet, failed or superseded; null while collecting).
- * Reopening a screen during a round joins it, so clients measure their wait from `startedAt`,
- * not from the reopen.
+ * Refresh answers carry what the server has now. Find My on the Mac runs while a client's map is
+ * open (the findmy-screen socket event) and its new locations follow over the socket.
  */
 export class FindMyRouter {
     static async refreshDevices(ctx: RouterContext, _: Next) {
         try {
-            const locations = await FindMyInterface.refreshDevices(isForced(ctx));
+            const locations = await FindMyInterface.refreshDevices();
             return new Success(ctx, {
                 message: "Successfully refreshed Find My device locations!",
-                data: locations,
-                metadata: FindMyInterface.round
+                data: locations
             }).send();
         } catch (ex: any) {
             throw new ServerError({
@@ -33,17 +30,36 @@ export class FindMyRouter {
 
     static async refreshFriends(ctx: RouterContext, _: Next) {
         try {
-            const locations = await FindMyInterface.refreshFriends(true, isForced(ctx));
+            const locations = await FindMyInterface.refreshFriends();
             return new Success(ctx, {
                 message: "Successfully refreshed Find My friends locations!",
-                data: locations,
-                metadata: FindMyInterface.round
+                data: locations
             }).send();
         } catch (ex: any) {
             throw new ServerError({
                 message: "Failed to refresh Find My friends locations!",
                 error: ex?.message ?? ex.toString()
             });
+        }
+    }
+
+    static async liveTracking(ctx: RouterContext, _: Next) {
+        let handle: string | null;
+        try {
+            handle = findMyLiveTrackingHandle(ctx.request.body);
+        } catch (ex: any) {
+            throw new BadRequest({ error: ex?.message ?? ex.toString() });
+        }
+        try {
+            const active = await FindMyInterface.setTrackedFriend(handle);
+            return new Success(ctx, {
+                message: active ? "Started Find My live tracking" : "Find My live tracking is off",
+                data: { active, handle: active ? handle : null }
+            }).send();
+        } catch (ex: any) {
+            const error = ex?.message ?? ex.toString();
+            if (findMyLiveTrackingFailureStatus(ex) === 404) throw new NotFound({ error });
+            throw new ServerError({ message: "Failed to change Find My live tracking", error });
         }
     }
 

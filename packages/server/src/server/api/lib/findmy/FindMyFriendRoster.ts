@@ -19,6 +19,12 @@ export const normalizeFindMyHandle = (handle: string): string => {
     return digits.length > 0 ? `tel:${digits}` : value;
 };
 
+/** Resolves a client-visible Apple phone/email to Apple's opaque friend id. */
+export const findMyFriendIdForHandle = (roster: FindMyRoster, handle: string): string | null => {
+    const normalized = normalizeFindMyHandle(handle);
+    return normalized.length > 0 ? roster.aliases.get(normalized) ?? null : null;
+};
+
 /**
  * Apple pads friend ids with trailing "~" in the encrypted (macOS 14.4+) caches.
  * Strip it so every source agrees on one id per friend.
