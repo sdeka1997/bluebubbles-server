@@ -1,5 +1,7 @@
 import net from "node:net";
 
+import { FindMyLiveRejected } from "./FindMyMirror";
+
 export type FindMyLiveBridgeRequest = {
     token: string;
     command: "start" | "stop";
@@ -124,8 +126,11 @@ export class FindMyLiveBridgeHost {
             }
             if (reply?.status === "ok") return;
             if (reply?.status === "error") {
-                lastError = new Error(reply.error ?? "Find My live bridge rejected start");
-                if (reply.error !== "Find My is not ready") throw lastError;
+                // Anything but "not ready" is Find My's answer about this friend, which a retry won't change
+                if (reply.error !== "Find My is not ready") {
+                    throw new FindMyLiveRejected(reply.error ?? "Find My live bridge rejected start");
+                }
+                lastError = new Error(reply.error);
             }
             if (attempt + 1 < READY_ATTEMPTS) await this.io.wait(READY_RETRY_MS);
         }

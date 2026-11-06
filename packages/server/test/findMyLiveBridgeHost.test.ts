@@ -10,6 +10,7 @@ import {
     FindMyLiveBridgeRequest,
     requestFindMyLiveBridge
 } from "../src/server/api/lib/findmy/FindMyLiveBridgeHost";
+import { FindMyLiveRejected } from "../src/server/api/lib/findmy/FindMyMirror";
 
 const fakeIo = () => {
     const removed: string[] = [];
@@ -204,7 +205,11 @@ test("does not retry a permanent bridge rejection", async () => {
     world.replies.push({ status: "error", error: "friend not found" });
 
     await host.launch();
-    await assert.rejects(host.start("missing-id"), /friend not found/);
+    await assert.rejects(host.start("missing-id"), (error: unknown) => {
+        assert.ok(error instanceof FindMyLiveRejected, "Find My's answer about this friend, not a broken bridge");
+        assert.match(String(error), /friend not found/);
+        return true;
+    });
 
     assert.equal(world.requests.length, 1);
     assert.deepEqual(world.waits, []);

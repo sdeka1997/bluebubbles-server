@@ -134,6 +134,13 @@ export class FindMyInterface {
             quitFindMy: async () => {
                 await FileSystem.executeAppleScript(quitFindMyFriends());
             },
+            // Only Find My itself, by its exact process name; it opens again on the next launch
+            forceQuitFindMy: () =>
+                new Promise<void>((resolve, reject) => {
+                    child_process.execFile("/usr/bin/killall", ["-KILL", "FindMy"], error =>
+                        error && (error as any).code !== 1 ? reject(error) : resolve()
+                    );
+                }),
             // Hidden (-g -j) with the live-location bridge loaded; it idles until a friend is tapped
             launchFindMyHidden: () => this.getLiveBridge().launch(),
             // A bridge socket outlives the server only along with the Find My it was launched into

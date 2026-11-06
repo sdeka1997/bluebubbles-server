@@ -8,6 +8,8 @@ export type FindMyMirrorIo = {
     isFindMyReady: () => Promise<boolean>;
     /** Asks Find My to quit; it is gone once isFindMyRunning says so */
     quitFindMy: () => Promise<void>;
+    /** Ends Find My at once, as Force Quit does; for a Find My that will not quit */
+    forceQuitFindMy: () => Promise<void>;
     /** Launches Find My without showing it, with the local live-location bridge loaded */
     launchFindMyHidden: () => Promise<void>;
     /** Whether a Find My launched by an earlier run of the server may still be running */
@@ -34,14 +36,26 @@ export type FindMyMirrorIo = {
     log: (message: string) => void;
 };
 
+/** Find My will never follow this friend (Apple has no such friend, or two); relaunching cannot help. */
+export class FindMyLiveRejected extends Error {}
+
 /** How often the mirror compares Find My with the open maps, and checks its files for a new write. */
 const CHECK_MS = 1000;
 
 /** How often to make sure Find My is still running while nothing else has changed. Each check is an osascript. */
 const ALIVE_CHECK_MS = 5000;
 
-/** How long a launched Find My may take to start before it is launched again. It takes ~1 s. */
+/** How long a launched Find My may take to start before it is force quit and launched again. It takes ~1 s. */
 const START_LIMIT_MS = 20 * 1000;
+
+/** How long Find My may refuse to quit before it is force quit. A quit takes ~0.2 s. */
+const QUIT_LIMIT_MS = 20 * 1000;
+
+/** How long a selection missing from the roster, or not looked up, waits to be looked up again. Apple adds friends within seconds. */
+const RETRY_LOOKUP_MS = 10 * 1000;
+
+/** How long a person Find My refused to follow waits to be tried again; its answer rarely changes. */
+const RETRY_REFUSED_MS = 30 * 1000;
 
 /** How long a Find My asked to quit is given to go before it is asked again. It takes ~0.2 s. */
 const QUIT_WAIT_MS = 2000;
@@ -125,6 +139,8 @@ export class FindMyMirror {
     private launchedFor: number | null = null;
     private startingSince: number | null = null;
     private quitAskedAt: number | null = null;
+    /** When the running Find My was first asked to quit, so one that never goes can be force quit */
+    private quittingSince: number | null = null;
     /** Whether Find My is up for the open maps: started, with its files being watched */
     private up = false;
     private lastAliveCheck = 0;
@@ -132,6 +148,8 @@ export class FindMyMirror {
     private followed: string | null = null;
     /** The last selection looked up, so each one is looked up once per launch */
     private lookedUp: { handle: string; friendId: string | null } | null = null;
+    /** A selection that could not be followed, and when it may be tried again */
+    private unfollowable: { handle: string; until: number } | null = null;
 
     private stepping = false;
     private changed = true;
@@ -192,13 +210,18 @@ export class FindMyMirror {
     /** One step towards Find My matching the open maps. Resolves whether to check again. */
     private async step(): Promise<boolean> {
         const now = this.io.now();
-        const steady = this.up && !this.changed && now - this.lastAliveCheck < ALIVE_CHECK_MS;
+        const starting = this.startingSince !== null && now - this.startingSince < START_LIMIT_MS;
+        // While our launch is still starting, whether it is ready is all there is to know yet
+        const awaitingStart = starting && this.isOpen && this.launchedFor === this.opening && !this.up;
+        if (awaitingStart && !(await this.io.isFindMyReady())) return true;
+        const steady = awaitingStart || (this.up && now - this.lastAliveCheck < ALIVE_CHECK_MS);
         const running = steady || (await this.io.isFindMyRunning());
         if (!steady) this.lastAliveCheck = now;
 
         if (!running) {
             this.up = false;
             this.quitAskedAt = null;
+            this.quittingSince = null;
             // Still starting: once it is up it is quit or used, as the maps then need
             if (this.startingSince !== null && now - this.startingSince < START_LIMIT_MS) return true;
             if (this.ours) this.io.forgetLaunch();
@@ -225,9 +248,8 @@ export class FindMyMirror {
 
         if (!this.up) {
             if (!(await this.io.isFindMyReady())) {
-                if (this.startingSince !== null && now - this.startingSince >= START_LIMIT_MS) {
-                    this.log("Find My: did not finish starting; relaunching it");
-                    this.launchedFor = null;
+                if (this.startingSince === null || now - this.startingSince >= START_LIMIT_MS) {
+                    await this.forceQuit("it did not finish starting");
                 }
                 return true;
             }
@@ -247,6 +269,7 @@ export class FindMyMirror {
 
     private async launch(): Promise<void> {
         this.lookedUp = null;
+        this.unfollowable = null;
         this.followed = null;
         this.startingSince = this.io.now();
         this.launchedFor = this.opening;
@@ -261,6 +284,8 @@ export class FindMyMirror {
     /** Asks Find My to quit; a later check sees it gone. It refuses while starting (osascript -128). */
     private async quit(reason: string): Promise<void> {
         const now = this.io.now();
+        this.quittingSince ??= now;
+        if (now - this.quittingSince >= QUIT_LIMIT_MS) return this.forceQuit(`it did not quit, as ${reason}`);
         if (this.quitAskedAt !== null && now - this.quitAskedAt < QUIT_WAIT_MS) return;
         if (!(await this.io.isFindMyReady())) return;
         try {
@@ -272,11 +297,26 @@ export class FindMyMirror {
         }
     }
 
+    /** Ends Find My at once; a later check sees it gone, and relaunches it if a map is open. */
+    private async forceQuit(reason: string): Promise<void> {
+        try {
+            await this.io.forceQuitFindMy();
+            this.log(`Find My: force quit it, as ${reason}`);
+        } catch (error) {
+            this.log(`Find My: failed to force quit: ${error}`);
+        }
+        this.startingSince = null;
+        this.quittingSince = null;
+        this.quitAskedAt = null;
+    }
+
     /** Apple's id for the person the most recently changed map has selected, or null. */
     private async selectedFriendId(): Promise<string | null> {
         const handle = [...this.viewers.values()].pop() ?? null;
         if (handle === null) return null;
-        if (this.lookedUp?.handle !== handle) {
+        const now = this.io.now();
+        if (this.unfollowable?.handle === handle && now < this.unfollowable.until) return null;
+        if (this.lookedUp?.handle !== handle || this.lookedUp.friendId === null) {
             let friendId: string | null = null;
             try {
                 friendId = await this.io.friendIdFor(handle);
@@ -285,6 +325,7 @@ export class FindMyMirror {
                 this.log(`Find My: could not look up the selected person: ${error}`);
             }
             this.lookedUp = { handle, friendId };
+            if (friendId === null) this.unfollowable = { handle, until: now + RETRY_LOOKUP_MS };
         }
         return this.lookedUp.friendId;
     }
@@ -296,6 +337,14 @@ export class FindMyMirror {
             else await this.io.startLiveTracking(friendId);
             this.followed = friendId;
         } catch (error) {
+            if (error instanceof FindMyLiveRejected && friendId !== null) {
+                // Find My itself is fine and following nobody new; only this person cannot be followed
+                this.log(`Find My: would not follow the selected person: ${error.message}`);
+                const handle = this.lookedUp?.handle;
+                if (handle) this.unfollowable = { handle, until: this.io.now() + RETRY_REFUSED_MS };
+                this.lookedUp = null;
+                return;
+            }
             // Apple may still be following someone; a fresh Find My follows nobody
             this.log(`Find My: live location command failed; relaunching it: ${error}`);
             this.launchedFor = null;

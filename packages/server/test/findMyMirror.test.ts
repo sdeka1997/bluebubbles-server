@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FindMyMirror, FindMyMirrorIo, findMyScreenHandle } from "../src/server/api/lib/findmy/FindMyMirror";
+import {
+    FindMyLiveRejected,
+    FindMyMirror,
+    FindMyMirrorIo,
+    findMyScreenHandle
+} from "../src/server/api/lib/findmy/FindMyMirror";
 
 type Fingerprint = { size: number; mtimeMs: number; ino: number };
 
@@ -10,7 +15,7 @@ const settle = async () => {
 };
 
 /** Apple's ids for the friends these tests name by handle. */
-const roster = new Map([
+const knownFriends = (): Map<string, string> => new Map([
     ["mom@example.com", "friend-mom"],
     ["dad@example.com", "friend-dad"],
     ["carol@example.com", "friend-carol"]
@@ -22,12 +27,14 @@ const fakeWorld = (
         running?: boolean;
         launchedEarlier?: boolean;
         neverStarts?: boolean;
+        neverReady?: boolean;
         readyAfterMs?: number;
         refusesQuits?: number;
     } = {}
 ) => {
     const calls: string[] = [];
     const logs: string[] = [];
+    const roster = knownFriends();
     const files = new Map<string, Fingerprint>([
         ["db", { size: 1, mtimeMs: 1, ino: 1 }],
         ["Devices.data", { size: 1, mtimeMs: 1, ino: 2 }]
@@ -35,20 +42,29 @@ const fakeWorld = (
     let running = options.running ?? false;
     let ready = running;
     let now = 0;
+    let osascripts = 0;
     let timers: { at: number; fn: () => void; id: number }[] = [];
     let nextId = 0;
     let refusals = options.refusesQuits ?? 0;
     let neverStarts = options.neverStarts ?? false;
     let commandFailures = 0;
-    let lookupFails = false;
+    let lookupFailures = 0;
+    let startRejection: string | null = null;
+    let neverReady = options.neverReady ?? false;
     let releaseCommand: (() => void) | null = null;
     let blockCommands = false;
     let releasePublish: (() => void) | null = null;
     let blockPublish = false;
 
     const io: FindMyMirrorIo = {
-        isFindMyRunning: async () => running,
-        isFindMyReady: async () => running && ready,
+        isFindMyRunning: async () => {
+            osascripts++;
+            return running;
+        },
+        isFindMyReady: async () => {
+            osascripts++;
+            return running && ready;
+        },
         quitFindMy: async () => {
             calls.push("quit");
             // Find My refuses to quit while it is still starting (osascript -128 "User canceled")
@@ -66,13 +82,19 @@ const fakeWorld = (
             calls.push("launch");
             if (neverStarts) return;
             io.schedule(() => (running = true), 300);
-            io.schedule(() => (ready = true), 300 + (options.readyAfterMs ?? 0));
+            if (!neverReady) io.schedule(() => (ready = true), 300 + (options.readyAfterMs ?? 0));
+        },
+        forceQuitFindMy: async () => {
+            calls.push("force-quit");
+            running = false;
+            ready = false;
         },
         launchedEarlier: () => options.launchedEarlier ?? false,
         forgetLaunch: () => calls.push("forget"),
         startLiveTracking: async friendId => {
             calls.push(`follow:${friendId}`);
             if (blockCommands) await new Promise<void>(resolve => (releaseCommand = resolve));
+            if (startRejection) throw new FindMyLiveRejected(startRejection);
             if (commandFailures > 0) {
                 commandFailures--;
                 throw new Error("bridge unavailable");
@@ -87,7 +109,10 @@ const fakeWorld = (
         },
         friendIdFor: async handle => {
             calls.push(`lookup:${handle}`);
-            if (lookupFails) throw new Error("The Find My FMF key is not imported");
+            if (lookupFailures > 0) {
+                lookupFailures--;
+                throw new Error("The Find My FMF key is not imported");
+            }
             return roster.get(handle) ?? null;
         },
         friendFiles: () => ["db"],
@@ -155,7 +180,12 @@ const fakeWorld = (
         lookups: () => calls.filter(call => call.startsWith("lookup:")).length,
         published: () => calls.filter(call => call.startsWith("publish")),
         failNextCommand: () => commandFailures++,
-        failLookups: () => (lookupFails = true),
+        failLookups: (count = 1000) => (lookupFailures = count),
+        rejectStarts: (reason: string | null) => (startRejection = reason),
+        addToRoster: (handle: string, friendId: string) => roster.set(handle, friendId),
+        removeFromRoster: (handle: string) => roster.delete(handle),
+        forceQuits: () => calls.filter(call => call === "force-quit").length,
+        osascripts: () => osascripts,
         refuseQuits: (count: number) => (refusals = count),
         startWorking: () => (neverStarts = false),
         blockCommands: () => (blockCommands = true),
@@ -445,16 +475,109 @@ test("a person not in Find My's roster is not followed, which stops a follow", a
     assert.deepEqual(world.follows(), ["follow:friend-mom", "unfollow"]);
 });
 
-test("a person who cannot be looked up is not followed", async () => {
+test("a person who cannot be looked up is not followed, and is looked up again", async () => {
     const world = fakeWorld();
     const mirror = new FindMyMirror(world.io);
-    world.failLookups();
+    world.failLookups(2);
 
     await openMap(world, mirror, "pixel", "mom@example.com");
-    await world.advance(2000);
-
     assert.deepEqual(world.follows(), []);
     assert.equal(world.isRunning(), true);
+
+    await world.advance(30_000);
+    assert.deepEqual(world.follows(), ["follow:friend-mom"]);
+});
+
+test("a person added to Find My after being selected is followed once they appear", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "new@example.com");
+    assert.deepEqual(world.follows(), []);
+
+    world.addToRoster("new@example.com", "friend-new");
+    await world.advance(30_000);
+
+    assert.deepEqual(world.follows(), ["follow:friend-new"]);
+});
+
+test("a person not in the roster is looked up again only now and then", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "stranger@example.com");
+
+    await world.advance(60_000);
+
+    assert.ok(world.lookups() <= 7, `looked up ${world.lookups()} times in a minute`);
+});
+
+test("a person Find My refuses to follow is not retried by relaunching", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror);
+    world.rejectStarts("friend not found");
+
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(120_000);
+
+    assert.equal(world.launches(), 1, "Find My is fine; only this person cannot be followed");
+    assert.ok(world.follows().length <= 7, `asked ${world.follows().length} times in two minutes`);
+    world.touch("db");
+    await world.advance(1000);
+    assert.ok(world.published().includes("publish-friends"), "the map keeps updating");
+});
+
+test("after a refusal, selecting someone else follows them at once", async () => {
+    const world = fakeWorld();
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror);
+    world.rejectStarts("friend not found");
+    mirror.setViewer("pixel", true, "mom@example.com");
+    await world.advance(2000);
+
+    world.rejectStarts(null);
+    mirror.setViewer("pixel", true, "dad@example.com");
+    await world.advance(1000);
+
+    assert.equal(world.follows().at(-1), "follow:friend-dad");
+});
+
+test("a Find My that is running but never finishes starting is force quit and launched again", async () => {
+    const world = fakeWorld({ neverReady: true });
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+
+    await world.advance(60_000);
+
+    assert.ok(world.forceQuits() >= 1);
+    assert.ok(world.launches() >= 2);
+    assert.ok(world.osascripts() <= 75, `${world.osascripts()} osascripts in a minute: about one a second`);
+});
+
+test("a Find My that never finishes starting is force quit once no map is open", async () => {
+    const world = fakeWorld({ neverReady: true });
+    const mirror = new FindMyMirror(world.io);
+    mirror.setViewer("pixel", true);
+    await world.advance(3000);
+
+    mirror.setViewer("pixel", false);
+    await world.advance(30_000);
+    const calls = world.calls.length;
+    await world.advance(60_000);
+
+    assert.equal(world.isRunning(), false);
+    assert.equal(world.calls.length, calls, "and then nothing is left to do");
+});
+
+test("a Find My that will not quit is force quit after a while", async () => {
+    const world = fakeWorld({ refusesQuits: 1000 });
+    const mirror = new FindMyMirror(world.io);
+    await openMap(world, mirror, "pixel", "mom@example.com");
+
+    mirror.setViewer("pixel", false);
+    await world.advance(30_000);
+
+    assert.equal(world.isRunning(), false, "a follow cannot outlive the map");
+    assert.equal(world.forceQuits(), 1);
 });
 
 test("a selection with no map open sends nothing and launches nothing", async () => {
@@ -490,10 +613,10 @@ test("after a failed command, a Find My that will not quit is asked again until 
     const mirror = new FindMyMirror(world.io);
     await openMap(world, mirror, "pixel", "mom@example.com");
     world.failNextCommand();
-    world.refuseQuits(30);
+    world.refuseQuits(3);
 
     mirror.setViewer("pixel", true, "dad@example.com");
-    await world.advance(10_000);
+    await world.advance(4000);
     assert.equal(world.launches(), 1, "not relaunched while the old one is still up");
     assert.deepEqual(world.follows(), ["follow:friend-mom", "follow:friend-dad"], "nothing sent to a Find My in an unknown state");
 
