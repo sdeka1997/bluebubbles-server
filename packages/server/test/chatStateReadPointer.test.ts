@@ -88,3 +88,31 @@ test("a message marked unread on an Apple device counts even when older than the
     const transition = db.prepare(buildChatTransitionQuery()).all() as Array<{ is_read: number }>;
     assert.equal(transition[0].is_read, 0);
 });
+
+/**
+ * Measured on the server Mac: the snapshot visited every message of every chat
+ * (4-16 s for ~800k messages) to find the 4 unread ones. Starting from the
+ * unread index keeps the answer the same while touching only unread rows.
+ */
+test("the snapshot starts from unread incoming messages, not every message", () => {
+    const db = database();
+    db.exec("CREATE INDEX message_idx_isRead_isFromMe_itemType ON message(is_read, is_from_me, item_type)");
+    const chat = addChat(db, "iMessage;+;indexed", null);
+    addIncoming(db, chat, 500, 0);
+
+    const plan = (db.prepare(`EXPLAIN QUERY PLAN ${buildChatSnapshotQuery()}`).all() as Array<{ detail: string }>)
+        .map(row => row.detail)
+        .join("\n");
+    assert.match(plan, /message_idx_isRead_isFromMe_itemType/);
+});
+
+test("a chat whose messages are all read reports zero unread, not null", () => {
+    const db = database();
+    const chat = addChat(db, "iMessage;+;allread", null);
+    addIncoming(db, chat, 500, 1);
+    addIncoming(db, chat, 600, 1);
+
+    const snapshot = db.prepare(buildChatSnapshotQuery()).all() as Array<{ unread_count: number }>;
+    assert.equal(snapshot.length, 1);
+    assert.equal(snapshot[0].unread_count, 0);
+});

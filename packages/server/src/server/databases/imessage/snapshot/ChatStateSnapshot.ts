@@ -166,7 +166,7 @@ export function buildChatSnapshotQuery(): string {
     return `
         SELECT
             c.guid AS guid,
-            SUM(
+            COALESCE(SUM(
                 CASE
                     WHEN m.is_read = 0
                         AND m.item_type = 0
@@ -191,9 +191,12 @@ export function buildChatSnapshotQuery(): string {
                     THEN 1
                     ELSE 0
                 END
-            ) AS unread_count
+            ), 0) AS unread_count
         FROM chat c
         LEFT JOIN chat_message_join j ON j.chat_id = c.ROWID
+            AND j.message_id IN (
+                SELECT ROWID FROM message WHERE is_read = 0 AND is_from_me = 0 AND item_type = 0
+            )
         LEFT JOIN message m ON m.ROWID = j.message_id
         GROUP BY c.guid
     `;
