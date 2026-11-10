@@ -30,6 +30,7 @@ import {
     ImageMetadataKeys
 } from "./types";
 import { uuidv4 } from "@firebase/util";
+import { cachedValue } from "@server/helpers/cachedValue";
 
 const FindProcess = require("find-process");
 const { rimrafSync } = require("rimraf");
@@ -739,14 +740,17 @@ export class FileSystem {
         return account;
     }
 
+    // The clock offset barely moves; asking Apple on every server/info call cost 0.3-1.1 s each.
+    private static readonly timeSync = cachedValue(10 * 60 * 1000, async () => {
+        const output = (await FileSystem.execShellCommand(`sntp -t 2 time.apple.com`)).trim();
+        const matches = output.match(/[+-]?([0-9]*[.])?[0-9]+ \+\/- [+-]?([0-9]*[.])?[0-9]+/g);
+        if (!matches || matches.length === 0) throw new Error(`No time offset in: ${output}`);
+        return Number.parseFloat(matches[0].split(" +/- ")[0]);
+    });
+
     static async getTimeSync(): Promise<number | null> {
         try {
-            const output = (await FileSystem.execShellCommand(`sntp time.apple.com`)).trim();
-            const matches = output.match(/[+-]?([0-9]*[.])?[0-9]+ \+\/- [+-]?([0-9]*[.])?[0-9]+/g);
-            if (matches && matches.length > 0) {
-                const time = matches[0].split(" +/- ")[0];
-                return Number.parseFloat(time);
-            }
+            return await FileSystem.timeSync();
         } catch (ex) {
             Server().log("Failed to sync time with time servers!", "debug");
             Server().log(ex, "debug");
