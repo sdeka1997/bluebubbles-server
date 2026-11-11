@@ -1,4 +1,5 @@
 import { latestGroupTitles, QueryRunner } from "../../databases/imessage/helpers/latestGroupTitles";
+import { isChatFilteredAsSpam } from "./chatSpam";
 
 /**
  * Old group ids Messages keeps for a chat, from the chat's decoded `properties`
@@ -71,6 +72,32 @@ export async function groupingFields(run: QueryRunner, chats: GroupingChat[]): P
         });
     }
     return fields;
+}
+
+/** Everything the client groups and spam-files a chat by, and nothing else. */
+export type ChatGroupingRow = ChatGroupingFields & {
+    guid: string;
+    groupId: string | null;
+    isFilteredAsSpam: boolean;
+};
+
+/**
+ * [ChatGroupingRow]s for a page of [chats]: the same values a whole serialized
+ * chat carries, without its participants and the rest. The client checks every
+ * chat's grouping and spam state on each launch, and whole chats made that
+ * download four times larger.
+ */
+export async function groupingRows(
+    run: QueryRunner,
+    chats: Array<GroupingChat & { guid: string; groupId?: string | null }>
+): Promise<ChatGroupingRow[]> {
+    const fields = await groupingFields(run, chats);
+    return chats.map(chat => ({
+        guid: chat.guid,
+        groupId: chat.groupId ?? null,
+        isFilteredAsSpam: isChatFilteredAsSpam(chat.properties),
+        ...fields.get(chat.ROWID)
+    }));
 }
 
 /**

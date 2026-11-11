@@ -18,11 +18,21 @@ import { startChat } from "../apple/scripts";
 import { MessageInterface } from "./messageInterface";
 import { CHAT_READ_STATUS_CHANGED } from "@server/events";
 import { ChatSerializer } from "../serializers/ChatSerializer";
+import { ChatGroupingRow, groupingRows } from "../serializers/chatGroupIds";
 import { Attachment } from "@server/databases/imessage/entity/Attachment";
 import { Message } from "@server/databases/imessage/entity/Message";
 import { MessageSerializer } from "../serializers/MessageSerializer";
 
 export class ChatInterface {
+    /** The same chats and pages as [get], as [ChatGroupingRow]s. */
+    static async getGrouping({ offset = 0, limit = 1000 }: { offset?: number; limit?: number } = {}): Promise<
+        [ChatGroupingRow[], number]
+    > {
+        const [chats, total] = await Server().iMessageRepo.getChats({ withArchived: true, offset, limit });
+        const rows = await groupingRows((sql, params) => Server().iMessageRepo.db.query(sql, params), chats);
+        return [rows, total];
+    }
+
     static async get({
         guid = null,
         withArchived = true,

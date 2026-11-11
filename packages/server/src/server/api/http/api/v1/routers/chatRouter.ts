@@ -125,6 +125,16 @@ export class ChatRouter {
         const guid = body?.guid;
         let sort = body?.sort;
         const { offset, limit } = body;
+        const page = {
+            offset: offset ? Number.parseInt(offset, 10) : 0,
+            limit: limit ? Number.parseInt(limit, 10) : 1000
+        };
+
+        // Only what the client groups and spam-files chats by; see ChatGroupingRow.
+        if (withQuery.includes("grouping")) {
+            const [rows, total] = await ChatInterface.getGrouping(page);
+            return new Success(ctx, { data: rows, metadata: { count: rows.length, total, offset, limit } }).send();
+        }
 
         // Default to sorting by last message if with last message
         if (withLastMessage && isEmpty(sort)) {
@@ -135,8 +145,7 @@ export class ChatRouter {
         const [results, total] = await ChatInterface.get({
             guid,
             withLastMessage,
-            offset: offset ? Number.parseInt(offset, 10) : 0,
-            limit: limit ? Number.parseInt(limit, 10) : 1000,
+            ...page,
             sort
         });
 

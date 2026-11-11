@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { groupingFields } from "../src/server/api/serializers/chatGroupIds";
+import { groupingFields, groupingRows } from "../src/server/api/serializers/chatGroupIds";
 
 // Answers the two read-only queries groupingFields makes, from fixed tables.
 function runner(original: Record<number, string | null>, renames: Array<[number, string | null]>, failOriginal = false) {
@@ -52,4 +52,16 @@ test("no chats means no queries", async () => {
     const { run, calls } = runner({}, []);
     assert.equal((await groupingFields(run, [])).size, 0);
     assert.equal(calls.length, 0);
+});
+
+test("a grouping row carries exactly what the client groups and spam-files a chat by", async () => {
+    const { run } = runner({ 35: "B6EF9F32" }, [[35, "family"]]);
+    const rows = await groupingRows(run, [
+        { ROWID: 35, style: 43, guid: "iMessage;+;chat1", groupId: "G1", properties: [{ LegacyGroupIdentifiers: ["OLD-1"], SMSCategory: 1 }] },
+        { ROWID: 7, style: 45, guid: "SMS;-;+15550001", groupId: null, properties: null }
+    ]);
+    assert.deepEqual(rows, [
+        { guid: "iMessage;+;chat1", groupId: "G1", isFilteredAsSpam: true, originalGroupId: "B6EF9F32", legacyGroupIds: ["OLD-1"], latestGroupTitle: "family" },
+        { guid: "SMS;-;+15550001", groupId: null, isFilteredAsSpam: false, originalGroupId: null, legacyGroupIds: [], latestGroupTitle: null }
+    ]);
 });
