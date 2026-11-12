@@ -1,227 +1,65 @@
-# BlueBubbles Server
+# BubbleBeam Server
 
-This is the back-end server for the BlueBubbles App. It allows you to forward your iMessages to and from an Android device via the BlueBubbles App.
+The Mac half of [BubbleBeam](https://github.com/sdeka1997/bluebubbles-app), an Android client for iMessage. It's a fork of the [BlueBubbles Server](https://github.com/BlueBubblesApp/bluebubbles-server): it runs on a Mac you own, signed in to iMessage, and passes your messages to and from the Android app.
 
-## Pre-requisites
+It began as a few fixes to BlueBubbles and grew into the server side of its own app: Find My mirrored from the Mac, Apple's read state, deletions and Spam passed through to Android, and faster answers to the app.
 
--   NodeJS: https://nodejs.org/en/
--   Git: https://git-scm.com/
+> **BubbleBeam is an independent project.** It isn't made, endorsed or supported by the BlueBubbles team, so please don't take BubbleBeam issues to them.
 
-**Warning**: Yarn may not work for this project. You may run into build errors.
+> The Mac app itself still says "BlueBubbles Server". Only this repository carries the new name so far.
 
-## Development
+---
 
-1. Clone the repository
-    - `git clone git@github.com:BlueBubblesApp/BlueBubbles-Server.git`
-2. Navigate into the repository on your local machine
-    - `cd BlueBubbles-Server`
-3. Install the server dependencies
-    - `npm install`
-4. Run the dev server (this will start both the renderer and server)
-    - `npm run start`
+## What's different from BlueBubbles
 
-### macOS Warning
+### Find My, mirrored from the Mac
+- **Friends, devices and items** are read from the Mac's own Find My data, including the encrypted caches Apple uses from macOS 14.4 on. On those versions, import the three Find My keys under Settings → Features.
+- **Live location:** Find My runs on the Mac only while a Find My screen is open in the app, and each new location is sent the moment it arrives. The address follows as a second update.
+- **Addresses** come from Apple's own geocoder on the Mac.
 
-If you are using macOS 10.x and are having issues building/running the server, please downgrade the `node-mac-permissions` dependency to `v2.2.0`. The reason it's on a newer version is to fix a production crashing issue on Big Sur+. Please downgrade it manually for testing on macOS v10.x.
+### Behaves like your iPhone
+- **Read state:** reading a chat, or marking it unread, on a Mac or iPhone reaches Android, including "Mark as Unread" on an iPhone.
+- **Deletions:** chats you delete and messages moved to Recently Deleted are passed on to the app.
+- **Spam:** the server tells the app which chats Messages filed under Spam.
+- **Thread grouping:** each message's service (iMessage, SMS or RCS) and each chat's old group IDs are sent, so the app can group threads the way Messages does.
+- **Emoji tapbacks:** any emoji can be sent as a reaction (requires the Private API).
+
+### Faster and steadier
+- Loading messages no longer blocks the server for seconds at a time.
+- Notifications for large messages, which used to be dropped, now get through, and read events are sent first.
+- The app downloads contact photos only when they've changed.
+- Self-update is turned off, so the official BlueBubbles updater can't replace this build.
+
+---
+
+## Getting started
+
+1. Set up the Mac as for BlueBubbles: the [BlueBubbles installation guide](https://bluebubbles.app/install/) still applies.
+2. Build this repository (see below). There are no packaged releases yet.
+3. Build the Android app from [the app repository](https://github.com/sdeka1997/bluebubbles-app) and connect it to the server.
+
+### Building
 
 ```bash
-cd packages/server
-npm install node-mac-permissions@2.2.0
+./build-server.sh     # Node 22 and npm 10; installs dependencies if they're missing
 ```
 
-## Structure / Directory Map
+You'll need your own Apple signing setup to package and run a release build.
 
-### Back-end
+---
 
-* Backend Code: `/bluebubbles-server/src/`
-* BlueBubbles Server: `/bluebubbles-server/src/server/index.ts`
-    - **Description**: This class is the main entry point to the whole backend. This classes manages the ngrok connection, the config database connection, the socket.io connection, and handles any inter-process-communications (IPC) from the "renderer" (UI).
-* BlueBubbles Types: `/bluebubbles-server/src/server/types.ts`
-    - **Description**: Holds the types for the BlueBubbles server. Defines what fields are required and optional, as well as which keys are required in a request/response
-* iMessage Library: `/bluebubbles-server/src/server/api/imessage`
-    - **Description**: This directory contains all of the classes and code needed to communicate with the iMessage Chat database. We use TypeORM as our decorator library for connecting to the database. This allows us to request information from the database in an object-oriented way
-* iMessage Database Models: `/bluebubbles-server/src/server/api/imessage/entity`
-    - **Description**" This directory contains all of the entities within the iMessage Chat database. These are also known as database "models". They defined the columns and their types. These files determine what "properties" are associated with each entity, and what we can get from the database table
-* iMessage Database Transformers: `/bluebubbles-server/src/server/api/imessage/transformers`
-    - **Description**: This directory contains what we call "transformers". They allow us to automatically convert values that we get from the database, as well as insert into the database. These are super helpful for the iMessage database. One instance they really help is with date conversions. iMessage stores dates as seconds since 2001. This is opposed to a "normal" seconds since EPOCH. On top of that, they switched the date formats from v10.12 to v10.13. The transformers allows us to seemlessly convert those date without having to worry about it in our "fetching" code. There are also transformers for integers to booleans as well as reaction IDs to strings
-* iMessage Database Listeners: `/bluebubbles-server/src/server/api/imessage/listeners`
-    - **Description**: These classes are "listeners". They allow you to listen on certain things. For instance, the MessageListener allows you to "listen" for new messages. It does this by polling the database for new information, then "emitting" that message to whoever is listening. These classes inherit the JS EventEmitter class
-* Filesystem Lib: `/bluebubbles-server/src/fileSystem`
-    - **Description**: This class allows us, and helps us, interact with the macOS filesystem. Mostly, reading/writing files to the app's directory.
-* Filesystem Scripts: `/bluebubbles-server/src/fileSystem/scripts.ts`
-    - **Description**: File that holds the Apple Scripts that get executed when sending a message, creating a chat, etc.
-* Server Helpers: `/bluebubbles-server/src/helpers`
-    - **Description**: Some helpers for executing actions from the client, or sending results back to the client
-* Socket Server: `/bluebubbles-server/src/services/socket`
-    - **Description**: The socket server that handles all incoming requests from connected sockets. Allows clients to request for bulk information such as getting chats, messages, etc.
-* FCM Server: `/bluebubbles-server/src/services/fcm`
-    - **Description**: This class will handle all communication with Google Firebase. This includes registering devices with FCM, sending notifications, etc.
+## Branches
 
-### Front-end
+- `main`: the server as it runs today. Everything is built from here.
+- `master`: an unchanged copy of upstream BlueBubbles, used to track their changes.
+- `archive/*` and `backup/*`: old work kept for reference.
 
-* Frontend Code: `/bluebubbles-server-ui/src/`
-* Fronend Layouts: `/bluebubbles-server-ui/src/layouts`
-    - **Description**: This directory contains the layouts for the frontend. In essence, these are the "containers" for all the pages.
-* Frontend Containers: `/bluebubbles-server-ui/src/containers`
-    - **Description**: The components in this directory are "containers" as in they will contain all the rest of the components. This typically is some sort of navigation or SPA routing container.
-* Frontend Components: `/bluebubbles-server-ui/src/components`
-    - **Description**: These are the re-usable components that you may use anywhere within the frontend. These may be "cards", or "buttons", or any other custom UI element.
-* Frontend Entrypoint: `/bluebubbles-server-ui/src/app.tsx`
+---
 
-## Current Feature-set
+## Credits and license
 
-* Map the iMessage Chat database and be able to read from it
-* Listen for changes in the messages database (new messages or updated messages)
-* Configure an ngrok connection to avoid port forwarding
-* Sending notifications over Google FCM to update the client with new messages or server updates
-* Updating the Google FCM database with new server information (incase notification doesn't get to the device)
-* Attachment chunking to avoid failed downloads on slower connections
-* Change the default socket port for the socket.io connection
-* Socket Handlers:
-    - Add FCM Device: `add-fcm-device`
-    - Get All Chats (with last message timestamp): `get-chats`
-    - Get Messages from a Chat: `get-chat-messages`
-    - Get Attachment by GUID: `get-attachment`
-    - Get Attachment by Chunk: `get-attachment-chunk`
-    - Get Last Chat Message: `get-last-chat-message`
-    - Send Message: `send-message`
-    - Start a Chat: `start-chat`
+BubbleBeam Server is built on the [BlueBubbles Server](https://github.com/BlueBubblesApp/bluebubbles-server), and keeps their work and its history. Thanks to the BlueBubbles team and contributors.
 
-## Response Types
+Licensed under the [Apache License 2.0](LICENSE), like BlueBubbles. Files changed in this fork carry those changes in the project's git history.
 
-This section will describe what information is returned back to the client from the server
-
-### Response Container
-
-This is the basic format of all responses
-
-#### Response Format
-
-```typescript
-const ResponseFormat = {
-    status: ValidStatuses;
-    message: ResponseMessages | string;
-    error?: Error;
-    data?: ResponseData;
-};
-```
-
-#### Valid Statuses
-
-```typescript
-type ValidStatuses = 200 | 201 | 400 | 401 | 403 | 404 | 500;
-```
-
-#### Response Messages
-
-```typescript
-enum ResponseMessages {
-    SUCCESS = 'Success',
-    BAD_REQUEST = 'Bad Request',
-    SERVER_ERROR = 'Server Error',
-    UNAUTHORIZED = 'Unauthorized',
-    FORBIDDEN = 'Forbidden',
-    NO_DATA = 'No Data'
-};
-```
-
-#### Response Data
-
-```typescript
-type ResponseData =
-    MessageResponse |
-    HandleResponse |
-    ChatResponse |
-    AttachmentResponse |
-    (MessageResponse | HandleResponse | ChatResponse | AttachmentResponse)[] |
-    Uint8Array |
-    null;
-```
-
-### Response Data
-
-Within each response container, there is an optional `data` key that contains any data that is returned by the server. That data includes different "views" from the database, whether it be chats, messages, etc.
-
-#### Message Response
-
-```typescript
-type MessageResponse = {
-    guid: string;
-    text: string;
-    handle?: HandleResponse | null;
-    chats?: ChatResponse[];
-    attachments?: AttachmentResponse[];
-    subject: string;
-    country: string;
-    error: boolean;
-    dateCreated: number;
-    dateRead: number | null;
-    dateDelivered: number | null;
-    isFromMe: boolean;
-    isDelayed: boolean;
-    isAutoReply: boolean;
-    isSystemMessage: boolean;
-    isServiceMessage: boolean;
-    isForward: boolean;
-    isArchived: boolean;
-    cacheRoomnames: string | null;
-    isAudioMessage: boolean;
-    datePlayed: number | null;
-    itemType: number;
-    groupTitle: string | null;
-    isExpired: boolean;
-    associatedMessageGuid: string | null;
-    associatedMessageType: number | null;
-    expressiveSendStyleId: string | null;
-    timeExpressiveSendStyleId: number | null;
-};
-```
-
-#### Chat Response
-
-```typescript
-type ChatResponse = {
-    guid: string;
-    participants?: HandleResponse[];
-    messages?: MessageResponse[];
-    style: number;
-    chatIdentifier: string;
-    isArchived: boolean;
-    displayName: string;
-    groupId: string;
-};
-```
-
-#### Handle Response
-
-```typescript
-type HandleResponse = {
-    messages?: MessageResponse[];
-    chats?: ChatResponse[];
-    address: string;
-    country: string;
-    uncanonicalizedId: string
-};
-```
-
-#### Attachment Response
-
-```typescript
-export type AttachmentResponse = {
-    guid: string;
-    messages: string[];
-    data: Uint8Array;
-    uti: string;
-    mimeType: string;
-    transferState: number;
-    totalBytes: number;
-    isOutgoing: boolean;
-    transferName: string;
-    isSticker: boolean;
-    hideAttachment: boolean;
-};
-```
-
-#### UInt8Array Response
-
-This response is used when chunking attachments. It allows us to send the data for an attachment in chunks. These chunks can be concatenated together to form the actual attachment. This will allow us to send large attachments over slow connections, or just receiving large attachments over normal connections. We can also use chunking to show a status (progress bar) for receiving attachments
+Mac, iMessage, iPhone, FaceTime and Find My are trademarks of Apple Inc. BubbleBeam isn't affiliated with Apple.
