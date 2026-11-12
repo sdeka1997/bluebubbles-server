@@ -4,6 +4,8 @@ import type { ChatSerializerMutliParams, ChatSerializerSingleParams } from "./ty
 import { MessageSerializer } from "./MessageSerializer";
 import { HandleSerializer } from "./HandleSerializer";
 import { isChatFilteredAsSpam } from "./chatSpam";
+import { chatMergeKey } from "./chatMergeKey";
+import { getMergeKeyContactMap } from "./chatMergeKeyContacts";
 
 export class ChatSerializer {
     static async serialize({
@@ -94,6 +96,13 @@ export class ChatSerializer {
                 ...{
                     isFiltered: chat.isFiltered,
                     groupId: chat.groupId,
+                    // How Messages groups chats into one conversation. Null when a
+                    // participant is not in Contacts; clients then fall back to
+                    // grouping by group id.
+                    mergeKey: chatMergeKey(
+                        (chat?.participants ?? []).map(handle => handle?.id),
+                        await getMergeKeyContactMap()
+                    ),
                     properties: chat.properties,
                     lastAddressedHandle: chat.lastAddressedHandle
                 }

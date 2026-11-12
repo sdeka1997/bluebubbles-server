@@ -101,6 +101,7 @@ export type ChatResponse = {
     isFilteredAsSpam?: boolean;
     displayName: string;
     groupId?: string;
+    mergeKey?: string | null;
     lastAddressedHandle?: string | null;
 };
 
