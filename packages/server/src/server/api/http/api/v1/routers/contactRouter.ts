@@ -11,7 +11,8 @@ export class ContactRouter {
     static async get(ctx: RouterContext, _: Next) {
         const extraProps = parseWithQuery(ctx.request.query?.extraProperties as string)
         const contacts = await ContactInterface.getAllContacts(extraProps);
-        return new Success(ctx, { data: contacts }).send();
+        const metadata = { photosVersion: await ContactInterface.getPhotosVersion() };
+        return new Success(ctx, { data: contacts, metadata }).send();
     }
 
     static async query(ctx: RouterContext, _: Next) {

@@ -172,6 +172,20 @@ export class ContactInterface {
     }
 
     /**
+     * Changes whenever a contact photo may have changed, without loading any photo.
+     * Read it after a contacts fetch: that arms the macOS change listener.
+     */
+    static async getPhotosVersion(): Promise<string> {
+        const row = await Server()
+            .repo.contacts()
+            .createQueryBuilder("contact")
+            .select("COUNT(*)", "count")
+            .addSelect("MAX(contact.updated)", "updated")
+            .getRawOne();
+        return ContactsLib.version.of({ count: Number(row?.count ?? 0), lastUpdated: row?.updated ?? null });
+    }
+
+    /**
      * Gets all known contacts from the API and local DBs
      *
      * @param extraProperties Non-default properties to fetch from the API

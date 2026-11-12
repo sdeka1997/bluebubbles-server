@@ -1,5 +1,6 @@
 import { Server } from "@server";
 import { isMinHighSierra } from "@server/env";
+import { ContactsVersion } from "./contactsVersion";
 
 // Only import node-mac-contacts if we are on macOS 10.13 or higher
 // This is because node-mac-contacts was compiled for macOS 10.13 or higher
@@ -27,6 +28,8 @@ export class ContactsLib {
         'instantMessageAddresses',
         'socialProfiles'
     ];
+
+    static version = new ContactsVersion();
 
     static async requestAccess() {
         if (!contacts) return "Unknown";
@@ -62,6 +65,7 @@ export class ContactsLib {
         contacts.listener.setup();
         contacts.listener.once('contact-changed', (_: string) => {
             Server().log("Detected contact change, queueing full reload...", "debug");
+            ContactsLib.version.markChanged();
             isFirstLoad = true;
             contacts.listener.remove();
         });
