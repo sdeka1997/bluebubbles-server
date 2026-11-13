@@ -1,8 +1,6 @@
-import { autoUpdater } from "electron-updater";
 import { Server } from "@server";
 import { FileSystem } from "@server/fileSystem";
 import { Tray } from ".";
-import { SERVER_UPDATE_DOWNLOADING } from "@server/events";
 import { Menu, nativeTheme, Tray as ElectronTray, app, nativeImage } from "electron";
 import { AppWindow } from "@windows/AppWindow";
 import path from "path";
@@ -85,8 +83,7 @@ export class AppTray extends Tray {
                 label: `Install Update (${Server().updater.updateInfo.tag_name})`,
                 type: "normal",
                 click: async () => {
-                    Server().emitMessage(SERVER_UPDATE_DOWNLOADING, null);
-                    await autoUpdater.downloadUpdate();
+                    await Server().updater.installUpdate();
                 }
             };
         }

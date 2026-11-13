@@ -6,18 +6,12 @@ import { ServerInterface } from "@server/api/interfaces/serverInterface";
 import { GeneralInterface } from "@server/api/interfaces/generalInterface";
 import { Success } from "../responses/success";
 import { AlertsInterface } from "@server/api/interfaces/alertsInterface";
-import { isEmpty, isTruthyBool } from "@server/helpers/utils";
+import { isEmpty } from "@server/helpers/utils";
 import { BadRequest, ServerError } from "../responses/errors";
 import { isMinHighSierra } from "@server/env";
 import { supportsChatStateSnapshot } from "@server/databases/imessage/snapshot/ChatStateSnapshot";
 import { isMinVentura } from "@server/env";
 import { supportsRecoverableMessages } from "@server/databases/imessage/snapshot/RecoverableMessageSnapshot";
-import { autoUpdater } from "electron-updater";
-import { SERVER_UPDATE_DOWNLOADING } from "@server/events";
-import {
-    OFFICIAL_UPDATES_ENABLED,
-    officialUpdateDisabledMessage
-} from "@server/services/updateService/customBuildPolicy";
 
 export class ServerRouter {
     static async getInfo(ctx: RouterContext, _: Next) {
@@ -67,33 +61,13 @@ export class ServerRouter {
     }
 
     static async installUpdate(ctx: RouterContext, _: Next) {
-        // Never let an API client bypass the custom build's disabled update checker.
-        if (!OFFICIAL_UPDATES_ENABLED) {
-            throw new BadRequest({
-                message: officialUpdateDisabledMessage(),
-                error: "CUSTOM_BUILD_UPDATE_DISABLED"
-            });
-        }
-
-        const waitParam = (ctx.request.query?.wait ?? "false") as string;
-        const wait = isTruthyBool(waitParam);
-
-        // Check if there even is an update
         const updateMetadata = await GeneralInterface.checkForUpdate();
         if (!updateMetadata?.available) {
             throw new BadRequest({ message: "No update available!", error: "NO_UPDATE_AVAILABLE" });
         }
 
-        // Once the update is downloaded, it should be installed automatically.
-        // Ref: updateService/index.ts
-        Server().emitMessage(SERVER_UPDATE_DOWNLOADING, null);
-        const waiter = autoUpdater.downloadUpdate();
-        if (wait) {
-            Server().log("Waiting for update to download...", "debug");
-            await waiter;
-        }
-
-        return new Success(ctx, { message: "Update has started downloading!" }).send();
+        await Server().updater.installUpdate();
+        return new Success(ctx, { message: "The verified update is ready; the server will restart." }).send();
     }
 
     static async restartServices(ctx: RouterContext, _: Next) {
